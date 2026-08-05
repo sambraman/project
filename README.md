@@ -22,6 +22,8 @@ frontend (Claude Design)  ->  THIS API  ->  cache (SQLite)
 | `figi.py` | Maps N-PORT holdings (CUSIP/ISIN) to tickers via the OpenFIGI API, cached |
 | `cache.py` | Stores results in a local SQLite file |
 | `refresh.py` | Pulls every tracked ticker into the cache; runs nightly or on demand |
+| `fundamentals/` | Company fundamentals from SEC EDGAR — `get_fundamentals(ticker)` (see below) |
+| `build_universe.py` / `build_dataset.py` / `test_prices.py` | Batch tools to build a `fundamentals.db` for a whole universe |
 | `app.py` | The web server (FastAPI) with the endpoints your frontend calls |
 | `smoke_test.py` | Offline logic checks — runs the whole function path with **no network, no server** |
 | `fixtures/` | Bundled sample issuer files (one per issuer type + real VTI/VEA/VXUS) so offline mode works out of the box |
@@ -114,8 +116,47 @@ telling you to wire it.
 **Endpoints:**
 - `GET /health` — is it alive
 - `GET /holdings?ticker=IVV` — full holdings (from cache; fetches live on a miss)
+- `GET /fundamentals?ticker=AAPL` — company fundamentals from SEC EDGAR (the join
+  partner to `/holdings`; add `&with_price=true` for PE/PB/PS if a price source is set)
 - `GET /tickers` — what's cached and how fresh
 - `POST /refresh` — trigger a refresh (needs a secret token)
+
+---
+
+## Company fundamentals (SEC EDGAR) — the look-through join partner
+
+The `fundamentals/` package turns a ticker into the valuation / profitability /
+growth / leverage metrics your look-through app shows for each underlying
+holding. It's the same SQLite/ticker pattern as holdings, so the frontend joins a
+portfolio's holdings to these metrics by ticker.
+
+```python
+from fundamentals import get_fundamentals
+d = get_fundamentals("AAPL")               # EDGAR-only metrics, free, no key
+d = get_fundamentals("AAPL", with_price=True)  # + PE/PB/PS/PEG if a price is available
+```
+
+* **Source:** SEC EDGAR `companyfacts` XBRL (free, no key). Paced at ~5 req/s with
+  a raw cache (`raw_cache/`), so batch runs and a busy service never hammer SEC.
+* **What's free vs. priced:** everything computes from EDGAR *except* the five
+  price multiples (PE/PB/PS/PEG, earnings-yield), which need a market price. Set
+  `EODHD_API_KEY` (or `pip install yfinance` for a dev fallback) and pass
+  `with_price=true` to fill them; otherwise they're left blank and everything
+  else is still returned.
+* **Coverage caveat:** foreign issuers/funds without US-GAAP XBRL return 404;
+  banks/insurers legitimately have blank current-ratio / margins.
+
+**Two ways to use it:**
+1. **Live per ticker** — `GET /fundamentals?ticker=AAPL` (what the frontend calls).
+2. **Batch a whole universe** into `fundamentals.db` / `.csv`:
+   ```bash
+   python build_universe.py            # top 2000 tickers from VTI -> universe.txt
+   python build_dataset.py             # -> fundamentals.db + fundamentals.csv (resumable)
+   python build_dataset.py --prices    # also fill the price multiples
+   python test_prices.py               # 10-ticker EODHD free-tier check (run first)
+   ```
+   `build_universe.py` pulls its ranked ticker list straight from the holdings
+   engine in this same repo — the two programs are now integrated.
 
 ---
 

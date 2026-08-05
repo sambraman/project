@@ -5,3 +5,5 @@ certifi>=2024.2.2        # live TLS on stock macOS/Linux Python
 openpyxl>=3.1            # parse SPDR's daily XLSX holdings file
 fastapi>=0.110           # web layer (app.py)
 uvicorn[standard]>=0.29  # ASGI server for app.py
+# Fundamentals (SEC EDGAR) need nothing beyond certifi + the stdlib. Optional:
+# yfinance>=0.2          # free dev price fallback for valuation multiples (PE/PB/PS)

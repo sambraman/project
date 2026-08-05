@@ -121,6 +121,60 @@ def main():
         check("cache tags fetched_at", "_fetched_at" in hit)
         check("cache list_tickers works", cache.list_tickers()[0]["ticker"] == "IVV")
 
+    print("Fundamentals — extract + metric math (synthetic companyfacts, no network)")
+    from fundamentals.extract import annual_series
+    from fundamentals.metrics import compute_metrics
+
+    def _flow(vals):   # {year: val} -> annual 10-K duration facts
+        return {"units": {"USD": [
+            {"form": "10-K", "start": f"{y}-01-01", "end": f"{y}-12-31",
+             "val": v, "filed": f"{y + 1}-02-15"} for y, v in vals.items()]}}
+
+    def _stock(vals, unit="USD"):
+        return {"units": {unit: [
+            {"form": "10-K", "end": f"{y}-12-31", "val": v, "filed": f"{y + 1}-02-15"}
+            for y, v in vals.items()]}}
+
+    facts = {"entityName": "Test Co", "facts": {"us-gaap": {
+        "Revenues": _flow({2021: 800, 2022: 900, 2023: 1000, 2024: 1200}),
+        "NetIncomeLoss": _flow({2023: 100, 2024: 150}),
+        "GrossProfit": _flow({2024: 480}),
+        "OperatingIncomeLoss": _flow({2024: 300}),
+        "InterestExpense": _flow({2024: 20}),
+        "EarningsPerShareDiluted": _flow({2023: 1.0, 2024: 1.5}),
+        "Assets": _stock({2024: 2000}),
+        "AssetsCurrent": _stock({2024: 800}),
+        "Liabilities": _stock({2024: 1000}),
+        "LiabilitiesCurrent": _stock({2024: 400}),
+        "StockholdersEquity": _stock({2024: 1000}),
+        "LongTermDebtNoncurrent": _stock({2024: 500}),
+        "CommonStockSharesOutstanding": _stock({2024: 100}, unit="shares"),
+    }}}
+    # A quarterly stub that must NOT be picked up as an annual value.
+    facts["facts"]["us-gaap"]["Revenues"]["units"]["USD"].append(
+        {"form": "10-Q", "start": "2024-01-01", "end": "2024-03-31", "val": 300,
+         "filed": "2024-04-15"})
+
+    s = annual_series(facts)
+    check("annual revenue series has 4 years", len(s["revenue"]) == 4)
+    check("quarterly stub excluded from annual revenue", 1200 in s["revenue"].values()
+          and 300 not in s["revenue"].values())
+    m = compute_metrics(s, price=30.0)
+    check("net_margin = 150/1200", abs(m["net_margin"] - 0.125) < 1e-6)
+    check("gross_margin = 480/1200", abs(m["gross_margin"] - 0.40) < 1e-6)
+    check("roe = 150/1000", abs(m["roe"] - 0.15) < 1e-6)
+    check("revenue_growth_yoy = 1200/1000-1", abs(m["revenue_growth_yoy"] - 0.20) < 1e-6)
+    check("earnings_growth_yoy = 150/100-1", abs(m["earnings_growth_yoy"] - 0.50) < 1e-6)
+    check("revenue_cagr_3y = (1200/800)^(1/3)-1",
+          abs(m["revenue_cagr_3y"] - ((1200 / 800) ** (1 / 3) - 1)) < 1e-6)
+    check("debt_to_equity = 500/1000", abs(m["debt_to_equity"] - 0.5) < 1e-6)
+    check("current_ratio = 800/400", abs(m["current_ratio"] - 2.0) < 1e-6)
+    check("interest_coverage = 300/20", abs(m["interest_coverage"] - 15.0) < 1e-6)
+    check("book_value_per_share = 1000/100", abs(m["book_value_per_share"] - 10.0) < 1e-6)
+    check("pe_ratio = price 30 / eps 1.5", abs(m["pe_ratio"] - 20.0) < 1e-6)
+    check("ps_ratio = 30 / (1200/100)", abs(m["ps_ratio"] - 2.5) < 1e-6)
+    check("multiples blank without a price", compute_metrics(s)["pe_ratio"] is None)
+
     print()
     if _failures:
         print(f"{len(_failures)} CHECK(S) FAILED:")

@@ -6,3 +6,6 @@ __pycache__/
 .ishares_map.json
 .sec_fund_map.json
 .figi_cache.json
+raw_cache/
+fundamentals.csv
+universe.txt

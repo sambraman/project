@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from cache import HoldingsCache
 from holdings import get_holdings, HoldingsError, classify_issuer
+from fundamentals import get_fundamentals
 import refresh as refresh_mod
 
 app = FastAPI(title="ETF Holdings Backend", version="1.0")
@@ -70,6 +71,25 @@ def holdings(ticker: str = Query(..., min_length=1),
     payload["cached"] = False
     payload["issuer_route"] = classify_issuer(ticker)
     return payload
+
+
+@app.get("/fundamentals")
+def fundamentals(ticker: str = Query(..., min_length=1),
+                 with_price: bool = Query(False, description="also compute PE/PB/PS "
+                                          "(needs EODHD_API_KEY or yfinance)")):
+    """Company fundamentals from SEC EDGAR for one ticker — valuation,
+    profitability, growth, and leverage metrics. This is the join partner to
+    /holdings: the frontend looks up each underlying holding's metrics here.
+
+    Always live from SEC (companyfacts are cached to raw_cache/ for a day). Not
+    affected by OFFLINE — there are no fundamentals fixtures; run build_dataset.py
+    if you want a prebuilt fundamentals.db instead."""
+    try:
+        return get_fundamentals(ticker, with_price=with_price)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"fundamentals fetch failed: {e}")
 
 
 @app.get("/tickers")
