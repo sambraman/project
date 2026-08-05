@@ -18,7 +18,8 @@ frontend (Claude Design)  ->  THIS API  ->  cache (SQLite)
 | File | Role |
 |---|---|
 | `holdings.py` | Fetches + parses holdings per issuer; `get_holdings(ticker)` is the core, plus a `python holdings.py <TICKER>` CLI |
-| `nport_source.py` | The universal N-PORT fallback (parser + the one live-lookup spot to wire) |
+| `nport_source.py` | The universal N-PORT fallback — SEC EDGAR ticker→CIK→latest NPORT-P→holdings |
+| `figi.py` | Maps N-PORT holdings (CUSIP/ISIN) to tickers via the OpenFIGI API, cached |
 | `cache.py` | Stores results in a local SQLite file |
 | `refresh.py` | Pulls every tracked ticker into the cache; runs nightly or on demand |
 | `app.py` | The web server (FastAPI) with the endpoints your frontend calls |
@@ -32,25 +33,32 @@ frontend (Claude Design)  ->  THIS API  ->  cache (SQLite)
 > holdings logic and made **stdlib-only** so the function and its tests run with
 > zero installs. FastAPI/pandas are needed only for the web server and live SPDR.
 
-### Coverage — any ETF from an accepted issuer
+### Coverage — any ETF, via a hybrid of daily feeds + SEC N-PORT
 
-`get_holdings()` no longer needs a ticker to be pre-registered. It **cascades**
-through the daily feeds and returns the first that yields real holdings, then
-falls back to N-PORT:
+`get_holdings()` **cascades** through sources and returns the first that yields
+real holdings, so a ticker never needs to be pre-registered. Verified live:
 
-* **SPDR, Invesco, Vanguard** — the holdings URL is keyed by ticker, so *any* of
-  their ETFs resolves live with no configuration (e.g. `XLE`, `RSP`, `VGT`).
-* **iShares** — needs a numeric product id. Common funds are seeded; everything
-  else is resolved from the live iShares product screener and cached to
-  `.ishares_map.json`. (The screener URL is a `# VERIFY` spot.)
-* **Everything else** (Schwab, other issuers) — routes to the N-PORT fallback,
-  flagged `is_stale`. **The live N-PORT download is still a stub** (`# VERIFY` in
-  `nport_source.py`): the parser is done and works on fixtures, but wiring the
-  SEC EDGAR ticker→CIK→filing lookup is the one piece left for full non-daily
-  coverage. Until then, non-daily issuers return a clear error live.
+| Source | Covers | Freshness | Notes |
+|---|---|---|---|
+| **Vanguard** JSON API | any Vanguard ETF (VOO, VTI, VEA…) | daily | full holdings **with tickers** — VOO = 502 names |
+| **SPDR** daily XLSX | any SPDR ETF (SPY, XLE, XLK…) | daily | parsed with `openpyxl`; SPY = 505 names |
+| **SEC N-PORT** (EDGAR) | **every other fund** (Schwab, iShares, Invesco, bond funds…) | quarterly (`is_stale`) | universal fallback — ticker→CIK→latest NPORT-P→parse |
+| iShares / Invesco daily | their ETFs | daily | *bot-protected right now* — they fall through to N-PORT until their endpoints are reverse-engineered |
 
-So live, with `OFFLINE=0`, the backend serves **any iShares / SPDR / Invesco /
-Vanguard ETF**; other issuers need the N-PORT fetch wired.
+**N-PORT → tickers.** N-PORT lists holdings by name + CUSIP/ISIN, not ticker, so
+those are enriched to tickers via **OpenFIGI** (`figi.py`). It works keyless at a
+slow rate; set `OPENFIGI_API_KEY` (free) for speed. Results cache to
+`.figi_cache.json`, and the SEC fund directory to `.sec_fund_map.json`, so
+repeat lookups are instant.
+
+So with `OFFLINE=0`, the backend serves **real full holdings for any ETF** —
+Vanguard/SPDR daily and everything else quarterly via N-PORT. iShares and Invesco
+currently arrive via N-PORT (quarterly) rather than their daily feeds.
+
+> The `# VERIFY` tags mark issuer URLs to re-confirm if a feed ever moves. Tip:
+> run the nightly `POST /refresh` (or `python refresh.py`) so the per-ticker
+> cache and OpenFIGI cache are warm before users hit the API — N-PORT + keyless
+> OpenFIGI can take ~30s on the very first fetch of a large fund.
 
 ---
 

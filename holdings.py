@@ -54,6 +54,13 @@ except Exception:  # certifi is optional; fall back to the system default.
 BASE_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = BASE_DIR / "fixtures"
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (etf-backend; +holdings)"}
+# Some issuer CDNs reject non-browser clients; use a fuller header set for those.
+_BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"),
+    "Accept": "text/csv,application/csv,application/vnd.ms-excel,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -158,8 +165,13 @@ def _finalize(holdings: list) -> list:
 
 def _parse_date(text: str) -> str:
     """Best-effort parse of an issuer's as-of string into an ISO date.
-    Accepts 'Jul 31, 2026', '31-Jul-2026', '2026-07-31', '07/31/2026', ..."""
+    Accepts 'Jul 31, 2026', '31-Jul-2026', '2026-07-31', '07/31/2026',
+    'As of 03-Aug-2026', and ISO datetimes like '2026-06-30T00:00:00-04:00'."""
     text = (text or "").strip().strip('"')
+    if text.lower().startswith("as of"):
+        text = text[5:].strip(" :")
+    if "T" in text and text[:4].isdigit():        # ISO datetime -> date part
+        text = text.split("T", 1)[0]
     fmts = ("%Y-%m-%d", "%b %d, %Y", "%B %d, %Y", "%d-%b-%Y", "%d-%B-%Y",
             "%m/%d/%Y", "%Y%m%d")
     for fmt in fmts:
@@ -368,45 +380,6 @@ def parse_invesco_csv(text: str) -> tuple[str, list]:
     return as_of, holdings
 
 
-def parse_spdr_table(text: str) -> tuple[str, list]:
-    """SPDR/State Street holdings. Live these come as XLSX with a 4-row preamble
-    (parsed via pandas in fetch_spdr); the fixture is the same table as CSV. The
-    preamble carries a 'Holdings: as of <date>' line."""
-    lines = text.splitlines()
-    as_of = ""
-    header_idx = None
-    for i, line in enumerate(lines):
-        low = line.lower()
-        if "as of" in low and not as_of:
-            # The date is usually the cell *after* the "as of" label, e.g.
-            #   Holdings: as of,"31-Jul-2026"
-            parts = next(csv.reader([line]))
-            for j, p in enumerate(parts):
-                if "as of" in p.lower():
-                    tail = p.split("as of")[-1].strip(" :")
-                    cand = tail or (parts[j + 1] if j + 1 < len(parts) else "")
-                    as_of = _parse_date(cand)
-                    break
-        if i != 0 and "ticker" in low and ("weight" in low or "name" in low):
-            header_idx = i
-            break
-    if header_idx is None:
-        raise HoldingsError("SPDR table: could not locate the holdings header row")
-    reader = csv.DictReader(lines[header_idx:])
-    fields = reader.fieldnames or []
-    tcol = _find_col(fields, ("ticker", "identifier"))
-    ncol = _find_col(fields, ("name",))
-    wcol = _find_col(fields, ("weight", "weight (%)"))
-    holdings = []
-    for row in reader:
-        holdings.append(Holding(
-            ticker=(row.get(tcol) or "").strip().upper(),
-            name=(row.get(ncol) or "").strip(),
-            weight=_to_decimal_weight(row.get(wcol)),
-        ))
-    return as_of, holdings
-
-
 def parse_vanguard_json(raw: bytes) -> tuple[str, list]:
     """Vanguard's public portfolio-holding API returns every equity constituent
     under fund.entity, each with a percentWeight. as-of is on the payload."""
@@ -452,10 +425,14 @@ def fetch_ishares(ticker: str, offline: bool) -> HoldingsResult:
                 f"iShares product id for {ticker} could not be resolved (not in "
                 f"the seed map and the screener lookup didn't return it)."
             )
-        # # VERIFY: iShares daily holdings CSV endpoint.
+        # # VERIFY: iShares daily holdings CSV endpoint. iShares bot-protects this;
+        # if it returns an HTML page instead of CSV, the parser raises and the
+        # cascade falls through to N-PORT (which covers iShares quarterly).
         url = (f"https://www.ishares.com/us/products/{pid}/fund/"
                f"1467271812596.ajax?fileType=csv&fileName={ticker}_holdings&dataType=fund")
-        text = _http_get(url).decode("utf-8", "replace")
+        text = _http_get(url, headers=_BROWSER_HEADERS).decode("utf-8", "replace")
+        if "<html" in text[:2000].lower():
+            raise HoldingsError("iShares returned an HTML page, not the holdings CSV")
     as_of, holdings = parse_ishares_csv(text)
     return HoldingsResult(ticker.upper(), as_of, "ishares", False, _finalize(holdings))
 
@@ -464,39 +441,76 @@ def fetch_invesco(ticker: str, offline: bool) -> HoldingsResult:
     if offline:
         text = _fixture_bytes(f"{ticker.upper()}.invesco.csv").decode("utf-8", "replace")
     else:
-        # # VERIFY: Invesco daily holdings CSV download endpoint.
+        # # VERIFY: Invesco daily holdings CSV. Currently returns HTTP 406 to
+        # non-browser clients; if it keeps rejecting, the cascade falls through to
+        # N-PORT. Browser headers are our best-effort to get the CSV.
         url = ("https://www.invesco.com/us/financial-products/etfs/holdings/main/"
                "holdings/0?audienceType=Investor&action=download&ticker="
                + urllib.parse.quote(ticker))
-        text = _http_get(url).decode("utf-8", "replace")
+        text = _http_get(url, headers=_BROWSER_HEADERS).decode("utf-8", "replace")
     as_of, holdings = parse_invesco_csv(text)
     return HoldingsResult(ticker.upper(), as_of, "invesco", False, _finalize(holdings))
+
+
+def parse_spdr_rows(rows: list) -> tuple[str, list]:
+    """Parse SPDR holdings from a list of spreadsheet rows (each a list of cell
+    values). The real file is: a few metadata rows (one is 'Holdings:', 'As of
+    <date>'), a blank row, a header row (Name/Ticker/Identifier/SEDOL/Weight/...),
+    then the holdings. The CSV fixture has the same layout, so this serves both."""
+    as_of = ""
+    header_idx = None
+    for i, r in enumerate(rows):
+        cells = [str(c).strip() if c is not None else "" for c in r]
+        joined = " ".join(cells).lower()
+        if not as_of and "as of" in joined:
+            for c in cells:
+                if "as of" in c.lower() or any(ch.isdigit() for ch in c):
+                    d = _parse_date(c)
+                    if d and d[:4].isdigit():
+                        as_of = d
+                        break
+        low = [c.lower() for c in cells]
+        if "ticker" in low and ("weight" in low or "name" in low):
+            header_idx = i
+            header = cells
+            break
+    if header_idx is None:
+        raise HoldingsError("SPDR table: could not locate the holdings header row")
+
+    col = {name.lower(): j for j, name in enumerate(header)}
+    ti = col.get("ticker")
+    ni = col.get("name")
+    wi = col.get("weight", col.get("weight (%)"))
+    holdings = []
+    for r in rows[header_idx + 1:]:
+        cells = list(r)
+        def cell(idx):
+            return cells[idx] if idx is not None and idx < len(cells) else None
+        tk = str(cell(ti) or "").strip().upper()
+        nm = str(cell(ni) or "").strip()
+        if not tk and not nm:
+            continue
+        holdings.append(Holding(tk, nm, _to_decimal_weight(cell(wi))))
+    return as_of, holdings
 
 
 def fetch_spdr(ticker: str, offline: bool) -> HoldingsResult:
     if offline:
         text = _fixture_bytes(f"{ticker.upper()}.spdr.csv").decode("utf-8", "replace")
-        as_of, holdings = parse_spdr_table(text)
+        rows = list(csv.reader(io.StringIO(text)))
     else:
-        # # VERIFY: SPDR per-ticker daily XLSX. Live parsing needs pandas+openpyxl;
-        # we import lazily so the stdlib-only core stays importable without them.
+        # SPDR/State Street daily XLSX. urllib follows the 301 to the CDN host
+        # automatically; we parse with openpyxl (lighter than pandas).  # VERIFY
         url = ("https://www.ssga.com/us/en/intermediary/library-content/products/"
                f"fund-data/etfs/us/holdings-daily-us-en-{ticker.lower()}.xlsx")
         try:
-            import pandas as pd
+            import openpyxl
         except ImportError as e:
-            raise HoldingsError(
-                "Live SPDR holdings are XLSX; install pandas+openpyxl, or use "
-                "--offline. (iShares/Invesco/Vanguard live paths need no extras.)"
-            ) from e
-        raw = _http_get(url)
-        df = pd.read_excel(io.BytesIO(raw), skiprows=4)
-        df = df.rename(columns={"Ticker": "ticker", "Name": "name", "Weight": "weight"})
-        holdings = [Holding(str(r.get("ticker", "")).strip().upper(),
-                            str(r.get("name", "")).strip(),
-                            _to_decimal_weight(r.get("weight")))
-                    for _, r in df.iterrows()]
-        as_of = ""
+            raise HoldingsError("SPDR holdings need openpyxl (pip install openpyxl).") from e
+        raw = _http_get(url, headers=_BROWSER_HEADERS)
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        rows = [[c.value for c in row] for row in wb.active.iter_rows()]
+    as_of, holdings = parse_spdr_rows(rows)
     return HoldingsResult(ticker.upper(), as_of, "spdr", False, _finalize(holdings))
 
 
@@ -514,9 +528,21 @@ def fetch_vanguard(ticker: str, offline: bool) -> HoldingsResult:
 
 def fetch_nport(ticker: str, offline: bool) -> HoldingsResult:
     """Universal fallback for any issuer without a clean daily feed (Schwab,
-    Vanguard bond funds, everything unknown). Quarterly, so flagged stale."""
-    from nport_source import nport_fetch  # local import to avoid a hard cycle
-    as_of, holdings = nport_fetch(ticker, offline=offline, fixtures_dir=FIXTURES_DIR)
+    Vanguard bond funds, everything unknown). Sourced from the fund's latest SEC
+    N-PORT filing, so quarterly and flagged stale.
+
+    N-PORT identifies holdings by name + CUSIP/ISIN, not ticker, so we enrich to
+    tickers via OpenFIGI (skipped offline / when it can't map a security)."""
+    from nport_source import nport_fetch   # local import to avoid a hard cycle
+    from figi import enrich_tickers
+
+    as_of, rows = nport_fetch(ticker, offline=offline, fixtures_dir=FIXTURES_DIR)
+    if not offline:
+        enrich_tickers(rows)                # fills row["ticker"] in place, best-effort
+    holdings = [Holding(str(r.get("ticker") or "").upper(),
+                        str(r.get("name") or "").strip(),
+                        _to_decimal_weight(r.get("weight")))
+                for r in rows]
     return HoldingsResult(ticker.upper(), as_of, "nport", True, _finalize(holdings))
 
 

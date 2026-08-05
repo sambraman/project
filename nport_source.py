@@ -1,24 +1,30 @@
 """
-nport_source.py — the universal N-PORT fallback.
+nport_source.py — the universal N-PORT fallback, sourced live from SEC EDGAR.
 
-Every fund files form N-PORT with the SEC quarterly, listing its complete
+Every registered fund files form N-PORT with the SEC, listing its complete
 portfolio. That makes it the catch-all for any issuer without a clean daily feed
-(Schwab, Vanguard bond funds, and anything not otherwise routed). It's quarterly,
-so callers flag these holdings `is_stale=True`.
+(Schwab, Vanguard bond funds, and anything not otherwise routed). It's quarterly
+with a filing lag, so callers flag these holdings `is_stale=True`.
 
-Two pieces:
-  * ``parse_nport_xml``  — pure parser for the N-PORT XML shape. Fully working;
-    exercised offline by the bundled fixtures.
-  * ``nport_fetch``      — locates + downloads the latest N-PORT for a ticker
-    from SEC EDGAR, then parses it. Offline it reads a fixture. The *live* lookup
-    is the one spot to confirm/replace with your own resolver — see # VERIFY.
+The live flow (all confirmed working against SEC EDGAR):
+  1. ticker -> (CIK, seriesId) via SEC's official fund directory
+     (https://www.sec.gov/files/company_tickers_mf.json), cached to
+     .sec_fund_map.json.
+  2. seriesId -> the fund's latest NPORT-P accession via EDGAR browse.
+  3. accession -> primary_doc.xml, parsed into holdings.
 
-To drop in your own N-PORT source, replace ``_live_nport_xml`` only; the parser
-and the public ``nport_fetch`` contract stay the same.
+N-PORT identifies each holding by name + CUSIP + ISIN (+ LEI), *not* ticker — so
+``nport_fetch`` returns dict rows carrying those identifiers, and the caller
+(holdings.fetch_nport) enriches them to tickers via OpenFIGI.
+
+Returned rows: [{"name", "cusip", "isin", "lei", "ticker", "weight"}] where
+`weight` is a percentage (pctVal); the caller normalizes to a decimal.
 """
 
 from __future__ import annotations
 
+import json
+import re
 import ssl
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -32,23 +38,35 @@ except Exception:
     _SSL_CONTEXT = ssl.create_default_context()
 
 # SEC requires a descriptive User-Agent with contact info on automated requests.
-SEC_HEADERS = {"User-Agent": "etf-backend holdings bot (contact: you@example.com)"}
+SEC_HEADERS = {"User-Agent": "etf-backend holdings bot (contact: sambraman12@gmail.com)"}
+SEC_FUND_MAP_URL = "https://www.sec.gov/files/company_tickers_mf.json"
+_FUND_MAP_CACHE = Path(__file__).resolve().parent / ".sec_fund_map.json"
 
 
+def _get(url: str, timeout: int = 45) -> bytes:
+    req = urllib.request.Request(url, headers=SEC_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as r:
+        return r.read()
+
+
+# --------------------------------------------------------------------------- #
+# Parsing (pure; exercised offline by the bundled fixtures)
+# --------------------------------------------------------------------------- #
 def _local(tag: str) -> str:
-    """Strip the XML namespace so we can match tags regardless of prefix."""
     return tag.rsplit("}", 1)[-1]
 
 
-def _find(elem, name):
-    for child in elem.iter():
-        if _local(child.tag) == name:
-            return child
-    return None
+def _first_text(root, name):
+    for e in root.iter():
+        if _local(e.tag) == name and e.text:
+            return e.text.strip()
+    return ""
 
 
 def _parse_date(text: str) -> str:
     text = (text or "").strip()
+    if "T" in text and text[:4].isdigit():
+        text = text.split("T", 1)[0]
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y%m%d"):
         try:
             return datetime.strptime(text, fmt).date().isoformat()
@@ -58,68 +76,108 @@ def _parse_date(text: str) -> str:
 
 
 def parse_nport_xml(raw: bytes):
-    """Parse an N-PORT filing into (as_of_iso, [(ticker, name, weight_decimal)]).
+    """Parse an N-PORT filing into (as_of_iso, rows).
 
-    Weights come from each security's <pctVal> (a percentage). Tickers aren't
-    always present in N-PORT (many rows only carry CUSIP/ISIN/LEI); those keep a
-    blank ticker and are still returned by name so weight totals stay honest.
-
-    Returns raw tuples (not Holding objects) to keep this module free of an
-    import cycle with holdings.py — the caller wraps them.
+    rows: [{"name", "cusip", "isin", "lei", "ticker", "weight"}]. `ticker` is
+    usually blank (N-PORT rarely carries it); the caller enriches from CUSIP/ISIN.
+    `weight` is the pctVal percentage. Rows with no weight and no id are skipped.
     """
     root = ET.fromstring(raw)
-
-    # Reporting period end date lives under genInfo/repPdDate (a few variants).
     as_of = ""
     for name in ("repPdDate", "reportDate", "repPdEnd"):
-        node = _find(root, name)
-        if node is not None and node.text:
-            as_of = _parse_date(node.text)
+        as_of = _first_text(root, name)
+        if as_of:
+            as_of = _parse_date(as_of)
             break
 
     rows = []
     for sec in root.iter():
         if _local(sec.tag) != "invstOrSec":
             continue
-        name = ticker = ""
-        weight = 0.0
+        row = {"name": "", "cusip": "", "isin": "", "lei": "", "ticker": "", "weight": 0.0}
         for child in sec.iter():
             tag = _local(child.tag)
-            if tag == "name" and not name:
-                name = (child.text or "").strip()
+            if tag == "name" and not row["name"]:
+                row["name"] = (child.text or "").strip()
+            elif tag == "title" and not row["name"]:
+                row["name"] = (child.text or "").strip()
+            elif tag == "cusip" and not row["cusip"]:
+                row["cusip"] = (child.text or "").strip()
+            elif tag == "lei" and not row["lei"]:
+                row["lei"] = (child.text or "").strip()
+            elif tag == "isin":
+                row["isin"] = (child.get("value") or child.text or "").strip()
             elif tag == "ticker":
-                ticker = (child.get("value") or child.text or "").strip().upper()
+                row["ticker"] = (child.get("value") or child.text or "").strip().upper()
             elif tag == "pctVal":
                 try:
-                    weight = float((child.text or "0").strip())
+                    row["weight"] = float((child.text or "0").strip())
                 except ValueError:
-                    weight = 0.0
-        if weight or name or ticker:
-            rows.append((ticker, name, weight))
+                    row["weight"] = 0.0
+        if row["weight"] or row["name"] or row["cusip"] or row["isin"]:
+            rows.append(row)
     return as_of, rows
 
 
-def _live_nport_xml(ticker: str) -> bytes:
-    """Fetch the most recent N-PORT XML for `ticker` from SEC EDGAR.
+# --------------------------------------------------------------------------- #
+# Live SEC EDGAR resolution
+# --------------------------------------------------------------------------- #
+def _load_fund_directory() -> dict:
+    """SEC fund directory: TICKER -> {"cik", "series"}. Cached to disk."""
+    if _FUND_MAP_CACHE.exists():
+        try:
+            return json.loads(_FUND_MAP_CACHE.read_text())
+        except Exception:
+            pass
+    data = json.loads(_get(SEC_FUND_MAP_URL))
+    out = {}
+    for row in data.get("data", []):
+        # fields: [cik, seriesId, classId, symbol]
+        cik, series, _cls, symbol = row[0], row[1], row[2], row[3]
+        if symbol:
+            out[str(symbol).upper()] = {"cik": cik, "series": series}
+    try:
+        _FUND_MAP_CACHE.write_text(json.dumps(out))
+    except Exception:
+        pass
+    return out
 
-    # VERIFY — this is the one live spot to confirm on your machine. The flow is:
-    ticker -> CIK (data.sec.gov ticker map) -> latest NPORT-P submission ->
-    primary_doc.xml. The scaffolding is here; wire your resolver / confirm the
-    accession lookup against a real filing, or swap this whole function for your
-    existing N-PORT downloader.
-    """
-    raise NotImplementedError(
-        "Live N-PORT lookup is not wired yet. Run with offline=True to use the "
-        "bundled fixtures, or implement _live_nport_xml() (ticker -> CIK -> "
-        "latest NPORT-P -> primary_doc.xml on SEC EDGAR)."
-    )
+
+def _latest_nport_accession(series: str):
+    """Return (trust_cik, accession_no_dashes) for the fund series' most recent
+    NPORT-P filing, or (None, None). EDGAR accepts a Series ID in the CIK slot."""
+    atom = _get(
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
+        f"&CIK={series}&type=NPORT-P&dateb=&owner=include&count=1&output=atom"
+    ).decode("utf-8", "replace")
+    accs = re.findall(r"accession-number>([\d-]+)<", atom)
+    ciks = re.findall(r"CIK=(\d+)", atom)
+    if not accs:
+        return None, None
+    cik = ciks[0] if ciks else None
+    return cik, accs[0].replace("-", "")
+
+
+def _live_nport_rows(ticker: str):
+    directory = _load_fund_directory()
+    rec = directory.get(ticker.upper())
+    if not rec:
+        raise LookupError(
+            f"{ticker} not found in the SEC fund directory (not an SEC-registered "
+            f"fund, or a UIT like SPY that files separately)."
+        )
+    trust_cik, acc = _latest_nport_accession(rec["series"])
+    if not acc:
+        raise LookupError(f"no NPORT-P filing found for {ticker} (series {rec['series']}).")
+    cik = trust_cik or rec["cik"]
+    base = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/"
+    # primary_doc.xml is the N-PORT payload in every current filing.
+    raw = _get(base + "primary_doc.xml")
+    return parse_nport_xml(raw)
 
 
 def nport_fetch(ticker: str, offline: bool = False, fixtures_dir: Path | None = None):
-    """Public entry: return (as_of_iso, [(ticker, name, weight_decimal)]).
-
-    Weights are normalized to decimal fractions here (N-PORT pctVal is a percent).
-    """
+    """Public entry: return (as_of_iso, rows). See module docstring for row shape."""
     if offline:
         fixtures_dir = Path(fixtures_dir or (Path(__file__).resolve().parent / "fixtures"))
         path = fixtures_dir / "nport" / f"{ticker.upper()}.xml"
@@ -129,14 +187,10 @@ def nport_fetch(ticker: str, offline: bool = False, fixtures_dir: Path | None = 
                 f"offline N-PORT fixture for {ticker} not found at {path}. "
                 f"Add fixtures/nport/{ticker.upper()}.xml or use a daily-feed ticker."
             )
-        raw = path.read_bytes()
-    else:
-        raw = _live_nport_xml(ticker)
+        return parse_nport_xml(path.read_bytes())
 
-    as_of, rows = parse_nport_xml(raw)
-    # Normalize percent -> decimal in one pass (mirrors holdings._normalize_weights).
-    weights = [w for _, _, w in rows]
-    scale = 100.0 if weights and max(weights) > 1.0 else 1.0
-    from holdings import Holding
-    holdings = [Holding(t, n, w / scale) for (t, n, w) in rows]
-    return as_of, holdings
+    try:
+        return _live_nport_rows(ticker)
+    except LookupError as e:
+        from holdings import HoldingsError
+        raise HoldingsError(str(e)) from e

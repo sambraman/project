@@ -83,9 +83,10 @@ def main():
     schd = get_holdings("SCHD", offline=True)
     check("SCHD routed to nport", schd.source == "nport")
     check("SCHD flagged stale", schd.is_stale is True)
-    check("SCHD as-of = repPdDate 2026-06-30", schd.as_of == "2026-06-30")
-    check("SCHD dropped zero/blank-ticker private placement kept by name",
-          any(h.name.startswith("Some Private") for h in schd.holdings))
+    check("SCHD as-of = repPdDate 2026-05-31", schd.as_of == "2026-05-31")
+    check("SCHD holdings kept by name (N-PORT carries no ticker)",
+          any(h.name.startswith("Texas Instruments") for h in schd.holdings))
+    check("SCHD weights normalized to decimals", schd.holdings[0].weight <= 1.0)
 
     print("Parser units")
     as_of, hs = parse_ishares_csv(
@@ -97,10 +98,12 @@ def main():
     nas, nrows = parse_nport_xml(
         b'<?xml version="1.0"?><edgarSubmission xmlns="x"><formData><genInfo>'
         b'<repPdDate>2026-03-31</repPdDate></genInfo><invstOrSecs><invstOrSec>'
-        b'<name>Foo</name><identifiers><ticker value="FOO"/></identifiers>'
+        b'<name>Foo Corp</name><cusip>111111111</cusip>'
+        b'<identifiers><isin value="US1111111111"/></identifiers>'
         b'<pctVal>12.5</pctVal></invstOrSec></invstOrSecs></formData></edgarSubmission>')
     check("N-PORT parser reads repPdDate", nas == "2026-03-31")
-    check("N-PORT parser reads a security", nrows and nrows[0][0] == "FOO")
+    check("N-PORT parser reads name + cusip", nrows and nrows[0]["name"] == "Foo Corp"
+          and nrows[0]["cusip"] == "111111111")
 
     print("Error handling")
     try:

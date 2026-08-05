@@ -1,11 +1,7 @@
-# The core holdings function + offline tests need NOTHING here — they run on the
-# Python standard library alone (csv/json/xml/sqlite3/urllib). certifi is only a
-# nicety for live TLS on stock macOS Python.
-#
-# These packages are for the web layer (app.py) and live SPDR (XLSX) parsing:
-fastapi>=0.110
-uvicorn[standard]>=0.29
-certifi>=2024.2.2
-# Live SPDR holdings are XLSX; needed only if you fetch SPY/XLK/... live:
-pandas>=2.2
-openpyxl>=3.1
+# The core holdings logic + offline smoke test run on the Python standard library
+# alone (csv/json/xml/sqlite3/urllib). These add: real TLS certs, SPDR's XLSX
+# parser, and the FastAPI web layer. No pandas — openpyxl reads SPDR directly.
+certifi>=2024.2.2        # live TLS on stock macOS/Linux Python
+openpyxl>=3.1            # parse SPDR's daily XLSX holdings file
+fastapi>=0.110           # web layer (app.py)
+uvicorn[standard]>=0.29  # ASGI server for app.py

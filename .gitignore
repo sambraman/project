@@ -4,3 +4,5 @@
 __pycache__/
 *.pyc
 .ishares_map.json
+.sec_fund_map.json
+.figi_cache.json

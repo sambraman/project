@@ -4,55 +4,68 @@
     <genInfo>
       <regName>Schwab Strategic Trust</regName>
       <seriesName>Schwab U.S. Dividend Equity ETF</seriesName>
-      <repPdDate>2026-06-30</repPdDate>
+      <repPdDate>2026-05-31</repPdDate>
     </genInfo>
     <invstOrSecs>
       <invstOrSec>
         <name>Texas Instruments Inc</name>
-        <identifiers><ticker value="TXN"/></identifiers>
-        <balance>1000000</balance>
+        <lei>549300ELEXHEDF8HAT41</lei>
+        <title>Texas Instruments Inc</title>
+        <cusip>882508104</cusip>
+        <identifiers><isin value="US8825081040"/></identifiers>
         <pctVal>4.35</pctVal>
       </invstOrSec>
       <invstOrSec>
         <name>Cisco Systems Inc</name>
-        <identifiers><ticker value="CSCO"/></identifiers>
-        <balance>1200000</balance>
+        <lei>549300MEWU8RXWEWK395</lei>
+        <title>Cisco Systems Inc</title>
+        <cusip>17275R102</cusip>
+        <identifiers><isin value="US17275R1023"/></identifiers>
         <pctVal>4.10</pctVal>
       </invstOrSec>
       <invstOrSec>
         <name>Coca-Cola Co</name>
-        <identifiers><ticker value="KO"/></identifiers>
-        <balance>1500000</balance>
+        <lei>UWJKFUJFZ02DKWI3RY53</lei>
+        <title>Coca-Cola Co</title>
+        <cusip>191216100</cusip>
+        <identifiers><isin value="US1912161007"/></identifiers>
         <pctVal>4.02</pctVal>
       </invstOrSec>
       <invstOrSec>
         <name>Verizon Communications Inc</name>
-        <identifiers><ticker value="VZ"/></identifiers>
-        <balance>2000000</balance>
+        <lei>2S72QS2UN71PN5RRQ757</lei>
+        <title>Verizon Communications Inc</title>
+        <cusip>92343V104</cusip>
+        <identifiers><isin value="US92343V1044"/></identifiers>
         <pctVal>3.98</pctVal>
       </invstOrSec>
       <invstOrSec>
         <name>Amgen Inc</name>
-        <identifiers><ticker value="AMGN"/></identifiers>
-        <balance>300000</balance>
+        <lei>62QBXGPJ34I25GYOQC71</lei>
+        <title>Amgen Inc</title>
+        <cusip>031162100</cusip>
+        <identifiers><isin value="US0311621009"/></identifiers>
         <pctVal>3.90</pctVal>
       </invstOrSec>
       <invstOrSec>
         <name>Home Depot Inc</name>
-        <identifiers><ticker value="HD"/></identifiers>
-        <balance>250000</balance>
+        <lei>QEKMOTMBBKA8I76O9O21</lei>
+        <title>Home Depot Inc</title>
+        <cusip>437076102</cusip>
+        <identifiers><isin value="US4370761029"/></identifiers>
         <pctVal>3.85</pctVal>
       </invstOrSec>
       <invstOrSec>
         <name>Chevron Corp</name>
-        <identifiers><ticker value="CVX"/></identifiers>
-        <balance>400000</balance>
+        <lei>N4ES6HYUII4GHMDDKF44</lei>
+        <title>Chevron Corp</title>
+        <cusip>166764100</cusip>
+        <identifiers><isin value="US1667641005"/></identifiers>
         <pctVal>3.70</pctVal>
       </invstOrSec>
       <invstOrSec>
-        <name>Some Private Placement (no ticker)</name>
-        <identifiers><cusip>000000000</cusip></identifiers>
-        <balance>100000</balance>
+        <name>Private Placement Note (no public id)</name>
+        <cusip>000000000</cusip>
         <pctVal>0.40</pctVal>
       </invstOrSec>
     </invstOrSecs>
