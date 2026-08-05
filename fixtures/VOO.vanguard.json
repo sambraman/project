@@ -1,0 +1,42 @@
+{
+"asOfDate": "2026-06-30",
+"fund": {
+"entity": [
+{
+"ticker": "AAPL",
+"longName": "Apple Inc.",
+"percentWeight": 7.02
+},
+{
+"ticker": "MSFT",
+"longName": "Microsoft Corp.",
+"percentWeight": 6.58
+},
+{
+"ticker": "NVDA",
+"longName": "NVIDIA Corp.",
+"percentWeight": 6.05
+},
+{
+"ticker": "AMZN",
+"longName": "Amazon.com Inc.",
+"percentWeight": 4.0
+},
+{
+"ticker": "META",
+"longName": "Meta Platforms Inc.",
+"percentWeight": 2.5
+},
+{
+"ticker": "GOOGL",
+"longName": "Alphabet Inc. Class A",
+"percentWeight": 2.05
+},
+{
+"ticker": "BRK.B",
+"longName": "Berkshire Hathaway Inc.",
+"percentWeight": 1.7
+}
+]
+}
+}
