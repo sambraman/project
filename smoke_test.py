@@ -175,6 +175,38 @@ def main():
     check("ps_ratio = 30 / (1200/100)", abs(m["ps_ratio"] - 2.5) < 1e-6)
     check("multiples blank without a price", compute_metrics(s)["pe_ratio"] is None)
 
+    print("Fundamentals — 10-year history, coverage %, and store round-trip")
+    from fundamentals.metrics import compute_history
+    from fundamentals import CORE_METRICS
+    from store import FundamentalsStore
+    hist = compute_history(s, max_years=10)
+    check("history spans all revenue years", {r["fiscal_year"] for r in hist}
+          == {2021, 2022, 2023, 2024})
+    check("history newest-first", hist[0]["fiscal_year"] == 2024)
+    check("history per-year growth (2024 vs 2023)",
+          abs(hist[0]["revenue_growth_yoy"] - 0.20) < 1e-6)
+    check("history earliest year has no YoY (no 2020 revenue)",
+          hist[-1]["fiscal_year"] == 2021 and hist[-1]["revenue_growth_yoy"] is None)
+    # Coverage: 2 years x CORE_METRICS, minus the earliest-year growth cells.
+    mapped = sum(1 for r in hist for k in CORE_METRICS if r.get(k) is not None)
+    total = len(hist) * len(CORE_METRICS)
+    pct = round(100 * mapped / total, 1)
+    check("coverage is a sensible 0-100%", 0 < pct <= 100)
+
+    record = {"ticker": "TEST", "cik": 1, "name": "Test Co", "sector": "Information Technology",
+              "industry": "x", "country": "United States", "hq": "Nowhere, NY",
+              "currency": "USD", "first_year": 2021, "last_year": 2024, "years_count": len(hist),
+              "coverage_pct": pct, "mapped_cells": mapped, "total_cells": total,
+              "history": hist}
+    with tempfile.TemporaryDirectory() as d:
+        st = FundamentalsStore(Path(d) / "f.db")
+        st.write_company(record)
+        got = st.get_company("TEST")
+        check("store round-trips a company", got and got["name"] == "Test Co")
+        check("store round-trips all history rows", got and len(got["history"]) == len(hist))
+        check("store search finds it by name", st.search("Test")[0]["ticker"] == "TEST")
+        check("store stats count", st.stats()["companies"] == 1)
+
     print()
     if _failures:
         print(f"{len(_failures)} CHECK(S) FAILED:")

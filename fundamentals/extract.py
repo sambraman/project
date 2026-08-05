@@ -86,3 +86,13 @@ def latest_year(series: dict):
     for f in ("revenue", "net_income", "assets"):
         years.update(series.get(f, {}).keys())
     return max(years) if years else None
+
+
+def all_years(series: dict) -> list:
+    """Every fiscal year present across the income/balance-sheet fields, ascending.
+    Restricted to the core reported fields so a stray share-count year doesn't
+    invent an empty period."""
+    years = set()
+    for f in ("revenue", "net_income", "assets", "equity", "operating_income"):
+        years.update(series.get(f, {}).keys())
+    return sorted(years)

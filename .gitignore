@@ -1,5 +1,6 @@
 .env
 *.db
+!data/fundamentals.db      # the catalogued dataset IS committed (built overnight)
 .venv/
 __pycache__/
 *.pyc

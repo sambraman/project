@@ -30,7 +30,8 @@ from pydantic import BaseModel
 
 from cache import HoldingsCache
 from holdings import get_holdings, HoldingsError, classify_issuer
-from fundamentals import get_fundamentals, get_classification
+from fundamentals import get_fundamentals, get_classification, get_history
+from store import FundamentalsStore, DEFAULT_PATH as STORE_PATH
 import refresh as refresh_mod
 
 BATCH_MAX = 60          # tickers per POST /fundamentals request
@@ -48,10 +49,15 @@ CACHE = HoldingsCache()
 REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")
 OFFLINE = os.environ.get("OFFLINE", "").lower() in ("1", "true", "yes", "on")
 
+# The catalogued fundamentals dataset (committed at data/fundamentals.db). Opened
+# read-only if present; endpoints fall back to live SEC for anything not in it.
+STORE = FundamentalsStore(read_only=True) if STORE_PATH.exists() else None
+
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "offline": OFFLINE}
+    return {"status": "ok", "offline": OFFLINE,
+            "catalog": (STORE.stats() if STORE else {"companies": 0})}
 
 
 @app.get("/holdings")
@@ -135,6 +141,38 @@ def fundamentals_batch(req: FundamentalsBatch):
     with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
         results = dict(pool.map(one, tickers))
     return {"mode": req.mode, "count": len(results), "results": results}
+
+
+@app.get("/company")
+def company(ticker: str = Query(..., min_length=1)):
+    """Full multi-year (up to 10) fundamentals for one company, for the
+    company-search page. Served from the committed catalog when present (instant,
+    no SEC call); otherwise computed live from SEC and returned the same shape.
+    Includes `coverage_pct` — the % of expected data points actually mapped."""
+    ticker = ticker.upper().strip()
+    if STORE:
+        hit = STORE.get_company(ticker)
+        if hit:
+            hit["source"] = "catalog"
+            return hit
+    try:
+        data = get_history(ticker)
+        data["source"] = "live"
+        return data
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"history fetch failed: {e}")
+
+
+@app.get("/search")
+def search(q: str = Query(..., min_length=1, description="ticker or company name"),
+           limit: int = Query(20, ge=1, le=100)):
+    """Search the catalogued companies by ticker or name (for the search box).
+    Empty if no catalog has been built/committed yet."""
+    if not STORE:
+        return {"query": q, "results": [], "note": "no catalog built yet — run build_dataset.py"}
+    return {"query": q, "results": STORE.search(q, limit=limit)}
 
 
 @app.get("/tickers")

@@ -22,8 +22,9 @@ frontend (Claude Design)  ->  THIS API  ->  cache (SQLite)
 | `figi.py` | Maps N-PORT holdings (CUSIP/ISIN) to tickers via the OpenFIGI API, cached |
 | `cache.py` | Stores results in a local SQLite file |
 | `refresh.py` | Pulls every tracked ticker into the cache; runs nightly or on demand |
-| `fundamentals/` | Company fundamentals from SEC EDGAR — `get_fundamentals(ticker)` (see below) |
-| `build_universe.py` / `build_dataset.py` / `test_prices.py` | Batch tools to build a `fundamentals.db` for a whole universe |
+| `fundamentals/` | Company fundamentals from SEC EDGAR — `get_fundamentals` / `get_history` (see below) |
+| `store.py` + `data/fundamentals.db` | The committed overnight catalog (companies + 10y history), read by the service |
+| `build_universe.py` / `build_dataset.py` / `test_prices.py` | Overnight cataloger + price tools |
 | `app.py` | The web server (FastAPI) with the endpoints your frontend calls |
 | `smoke_test.py` | Offline logic checks — runs the whole function path with **no network, no server** |
 | `fixtures/` | Bundled sample issuer files (one per issuer type + real VTI/VEA/VXUS) so offline mode works out of the box |
@@ -124,6 +125,10 @@ telling you to wire it.
   week-cached SEC call each (for the holdings table's sector/country columns and
   the By-Sector view); `"mode": "full"` returns the complete metrics. Capped at
   60 tickers/request; unknown/foreign tickers come back `null`.
+- `GET /company?ticker=AAPL` — **up to 10 fiscal years** of fundamentals for one
+  company plus a `coverage_pct` ("% of data mapped"). Served instantly from the
+  committed catalog when present, else computed live. Powers the company-search page.
+- `GET /search?q=apple` — search the catalogued companies by ticker or name.
 - `GET /tickers` — what's cached and how fresh
 - `POST /refresh` — trigger a refresh (needs a secret token)
 
@@ -153,16 +158,38 @@ d = get_fundamentals("AAPL", with_price=True)  # + PE/PB/PS/PEG if a price is av
   banks/insurers legitimately have blank current-ratio / margins.
 
 **Two ways to use it:**
-1. **Live per ticker** — `GET /fundamentals?ticker=AAPL` (what the frontend calls).
-2. **Batch a whole universe** into `fundamentals.db` / `.csv`:
-   ```bash
-   python build_universe.py            # top 2000 tickers from VTI -> universe.txt
-   python build_dataset.py             # -> fundamentals.db + fundamentals.csv (resumable)
-   python build_dataset.py --prices    # also fill the price multiples
-   python test_prices.py               # 10-ticker EODHD free-tier check (run first)
-   ```
-   `build_universe.py` pulls its ranked ticker list straight from the holdings
-   engine in this same repo — the two programs are now integrated.
+1. **Live per ticker** — `GET /fundamentals?ticker=AAPL` or `GET /company?ticker=AAPL`
+   (the frontend calls these; live path used for anything not in the catalog).
+2. **The overnight catalog** — a prebuilt dataset committed to the repo, so the
+   service serves companies instantly with no live SEC calls (see below).
+
+### The overnight catalog (`data/fundamentals.db`)
+
+Run this **once, overnight** to catalog up to 10 fiscal years of every metric for
+the top ~3000 US companies, then commit the result so deploys ship with the whole
+dataset baked in — it never has to keep hitting SEC.
+
+```bash
+python build_universe.py --top 3000   # ranked ticker list from VTI -> universe.txt
+python build_dataset.py --workers 8   # catalog -> data/fundamentals.db  (~20-30 min)
+# then commit the dataset so the web service (and GitHub) have it:
+git add -f data/fundamentals.db
+git commit -m "update fundamentals catalog" && git push
+```
+
+* **Resumable** — re-run any time; catalogued tickers are skipped, gaps fill in.
+* **Rate-safe** — concurrent fetches, but SEC's ~5 req/s throttle still paces every
+  call, so an overnight run won't get your IP blocked.
+* **Coverage** — each company row carries `coverage_pct` (% of expected data points
+  actually mapped); the search page shows it. ~250-name seed averaged ~84%.
+* The web service auto-detects `data/fundamentals.db` on startup: `/company` and
+  `/search` serve from it, and `/health` reports the catalog size. No DB yet →
+  those endpoints fall back to live SEC (`/company`) or return empty (`/search`).
+* Prices: `python test_prices.py` first (EODHD free-tier check), then
+  `python build_dataset.py` — set `EODHD_API_KEY` to fill valuation multiples.
+
+`build_universe.py` pulls its ranked ticker list straight from the holdings engine
+in this same repo — the two programs are integrated.
 
 ---
 

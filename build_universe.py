@@ -17,7 +17,7 @@ import sys
 from holdings import get_holdings, HoldingsError
 
 DEFAULT_SOURCE = "VTI"   # Vanguard total US market — full holdings, tickered, live
-DEFAULT_TOP = 2000
+DEFAULT_TOP = 3000
 
 
 def build_universe(source=DEFAULT_SOURCE, top=DEFAULT_TOP, offline=None,
