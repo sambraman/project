@@ -17,13 +17,33 @@ and app.py's /fundamentals endpoint uses it live per ticker.
 
 from __future__ import annotations
 
-from .edgar_client import company_facts, ticker_to_cik
+from .edgar_client import company_facts, company_submissions, ticker_to_cik
 from .extract import annual_series, latest_year
 from .metrics import compute_metrics
 from .prices import get_price
+from .classify import sic_to_sector, resolve_country
 
 __all__ = ["get_fundamentals", "compute_metrics", "annual_series",
            "company_facts", "ticker_to_cik", "get_price"]
+
+
+def _classification(cik: str) -> dict:
+    """sector / industry / country / HQ from SEC submissions (best-effort)."""
+    sub = company_submissions(cik)
+    if not sub:
+        return {"sector": "", "industry": "", "country": "", "hq": "",
+                "state_of_incorporation": ""}
+    biz = (sub.get("addresses") or {}).get("business") or {}
+    soc = sub.get("stateOfIncorporation") or ""
+    state_or_country = biz.get("stateOrCountry") or ""
+    city = biz.get("city") or ""
+    return {
+        "sector": sic_to_sector(sub.get("sic")),
+        "industry": sub.get("sicDescription") or "",
+        "country": resolve_country(state_or_country, soc),
+        "hq": ", ".join(p for p in (city.title() if city else "", state_or_country) if p),
+        "state_of_incorporation": soc,
+    }
 
 
 def get_fundamentals(ticker: str, with_price: bool = False,
@@ -47,5 +67,6 @@ def get_fundamentals(ticker: str, with_price: bool = False,
         "name": facts.get("entityName", ""),
         "fiscal_year": latest_year(series),
         "price": round(price, 4) if isinstance(price, (int, float)) else None,
+        **_classification(cik),
         **metrics,
     }

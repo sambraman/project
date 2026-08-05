@@ -118,3 +118,26 @@ def company_facts(ticker: str, max_age_hours: float = 24.0):
     except Exception:
         pass
     return cik, facts
+
+
+def company_submissions(cik: str, max_age_hours: float = 168.0) -> dict:
+    """The filer's submissions metadata (sic/sicDescription, addresses, state of
+    incorporation…). Cached a week — this rarely changes. Returns {} on failure
+    so classification is best-effort and never blocks the financials."""
+    cik = str(cik).zfill(10)
+    RAW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = RAW_CACHE_DIR / f"submissions_CIK{cik}.json"
+    if path.exists() and (time.time() - path.stat().st_mtime) < max_age_hours * 3600:
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            pass
+    try:
+        data = json.loads(_get(f"https://data.sec.gov/submissions/CIK{cik}.json"))
+    except Exception:
+        return {}
+    try:
+        path.write_text(json.dumps(data))
+    except Exception:
+        pass
+    return data

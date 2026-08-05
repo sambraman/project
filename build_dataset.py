@@ -28,7 +28,8 @@ CSV_PATH = Path("fundamentals.csv")
 UNIVERSE = Path("universe.txt")
 
 COLUMNS = [
-    "ticker", "cik", "name", "fiscal_year", "price",
+    "ticker", "cik", "name", "sector", "industry", "country", "hq",
+    "fiscal_year", "price",
     "revenue", "net_income", "assets", "equity", "debt", "shares_outstanding",
     "net_margin", "gross_margin", "operating_margin", "roe", "roa",
     "revenue_growth_yoy", "earnings_growth_yoy", "eps_growth_yoy", "revenue_cagr_3y",
@@ -39,7 +40,7 @@ COLUMNS = [
 
 
 def _col_type(c):
-    if c in ("ticker", "name"):
+    if c in ("ticker", "name", "sector", "industry", "country", "hq"):
         return "TEXT"
     if c in ("cik", "fiscal_year"):
         return "INTEGER"
