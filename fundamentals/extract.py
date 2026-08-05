@@ -32,7 +32,11 @@ def _annual_from_units(units: dict, kind: str) -> dict:
     by_year = {}   # year -> (value, filed_date_str)
     for facts in units.values():
         for f in facts:
-            if not str(f.get("form", "")).startswith("10-K"):
+            form = str(f.get("form", ""))
+            # Annual reports: 10-K (domestic), 20-F (foreign private issuers),
+            # 40-F (Canadian) — plus their /A amendments.
+            if not (form.startswith("10-K") or form.startswith("20-F")
+                    or form.startswith("40-F")):
                 continue
             end = f.get("end")
             val = f.get("val")
