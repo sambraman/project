@@ -24,10 +24,17 @@ import os
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from concurrent.futures import ThreadPoolExecutor
+
+from pydantic import BaseModel
+
 from cache import HoldingsCache
 from holdings import get_holdings, HoldingsError, classify_issuer
-from fundamentals import get_fundamentals
+from fundamentals import get_fundamentals, get_classification
 import refresh as refresh_mod
+
+BATCH_MAX = 60          # tickers per POST /fundamentals request
+BATCH_WORKERS = 8       # concurrent lookups (SEC's own throttle still paces to ~5/s)
 
 app = FastAPI(title="ETF Holdings Backend", version="1.0")
 
@@ -90,6 +97,44 @@ def fundamentals(ticker: str = Query(..., min_length=1),
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"fundamentals fetch failed: {e}")
+
+
+class FundamentalsBatch(BaseModel):
+    tickers: list[str]
+    mode: str = "classification"     # "classification" (fast, sector/geo) | "full"
+    with_price: bool = False         # only used when mode == "full"
+
+
+@app.post("/fundamentals")
+def fundamentals_batch(req: FundamentalsBatch):
+    """Enrich many tickers in one request — for the holdings table's sector/
+    country columns and the By-Sector view.
+
+    mode="classification" (default) returns just ticker/name/sector/industry/
+    country/hq using one cheap, week-cached SEC submissions call per ticker —
+    far lighter than the full financials. mode="full" returns everything
+    /fundamentals?ticker= returns. Capped at BATCH_MAX tickers; unknown/foreign
+    tickers come back as null rather than failing the batch."""
+    seen, tickers = set(), []
+    for t in req.tickers:
+        t = (t or "").strip().upper()
+        if t and t not in seen:
+            seen.add(t); tickers.append(t)
+    if len(tickers) > BATCH_MAX:
+        raise HTTPException(status_code=413,
+                            detail=f"too many tickers ({len(tickers)}); max {BATCH_MAX} per request")
+
+    def one(t):
+        try:
+            if req.mode == "full":
+                return t, get_fundamentals(t, with_price=req.with_price)
+            return t, get_classification(t)
+        except Exception:
+            return t, None
+
+    with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
+        results = dict(pool.map(one, tickers))
+    return {"mode": req.mode, "count": len(results), "results": results}
 
 
 @app.get("/tickers")

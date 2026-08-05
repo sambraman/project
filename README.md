@@ -118,6 +118,12 @@ telling you to wire it.
 - `GET /holdings?ticker=IVV` — full holdings (from cache; fetches live on a miss)
 - `GET /fundamentals?ticker=AAPL` — company fundamentals from SEC EDGAR (the join
   partner to `/holdings`; add `&with_price=true` for PE/PB/PS if a price source is set)
+- `POST /fundamentals` — batch enrich many tickers in one request. Body:
+  `{"tickers": ["AAPL","MSFT",...], "mode": "classification"}`. `classification`
+  (default) returns just sector/industry/country/HQ per ticker from one cheap,
+  week-cached SEC call each (for the holdings table's sector/country columns and
+  the By-Sector view); `"mode": "full"` returns the complete metrics. Capped at
+  60 tickers/request; unknown/foreign tickers come back `null`.
 - `GET /tickers` — what's cached and how fresh
 - `POST /refresh` — trigger a refresh (needs a secret token)
 

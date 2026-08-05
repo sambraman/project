@@ -23,27 +23,42 @@ from .metrics import compute_metrics
 from .prices import get_price
 from .classify import sic_to_sector, resolve_country
 
-__all__ = ["get_fundamentals", "compute_metrics", "annual_series",
-           "company_facts", "ticker_to_cik", "get_price"]
+__all__ = ["get_fundamentals", "get_classification", "compute_metrics",
+           "annual_series", "company_facts", "ticker_to_cik", "get_price"]
 
 
 def _classification(cik: str) -> dict:
-    """sector / industry / country / HQ from SEC submissions (best-effort)."""
+    """sector / industry / country / HQ / name from SEC submissions (best-effort)."""
     sub = company_submissions(cik)
     if not sub:
-        return {"sector": "", "industry": "", "country": "", "hq": "",
+        return {"name": "", "sector": "", "industry": "", "country": "", "hq": "",
                 "state_of_incorporation": ""}
     biz = (sub.get("addresses") or {}).get("business") or {}
     soc = sub.get("stateOfIncorporation") or ""
     state_or_country = biz.get("stateOrCountry") or ""
     city = biz.get("city") or ""
     return {
+        "name": sub.get("name") or "",
         "sector": sic_to_sector(sub.get("sic")),
         "industry": sub.get("sicDescription") or "",
         "country": resolve_country(state_or_country, soc),
         "hq": ", ".join(p for p in (city.title() if city else "", state_or_country) if p),
         "state_of_incorporation": soc,
     }
+
+
+def get_classification(ticker: str) -> dict:
+    """Lightweight sector/geography only — one cheap, week-cached SEC submissions
+    call (no companyfacts download). This is what the holdings list's sector/
+    country columns and the By-Sector view need. Raises LookupError if the ticker
+    has no CIK (foreign issuer / fund)."""
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        raise LookupError("ticker is required")
+    cik = ticker_to_cik(ticker)
+    if not cik:
+        raise LookupError(f"{ticker}: no CIK in SEC company_tickers.json")
+    return {"ticker": ticker, "cik": int(cik), **_classification(cik)}
 
 
 def get_fundamentals(ticker: str, with_price: bool = False,
@@ -61,12 +76,13 @@ def get_fundamentals(ticker: str, with_price: bool = False,
         price = get_price(ticker)
     metrics = compute_metrics(series, price=price)
 
-    return {
+    data = {
         "ticker": ticker,
         "cik": int(cik),
-        "name": facts.get("entityName", ""),
         "fiscal_year": latest_year(series),
         "price": round(price, 4) if isinstance(price, (int, float)) else None,
         **_classification(cik),
         **metrics,
     }
+    data["name"] = data.get("name") or facts.get("entityName", "")
+    return data

@@ -57,8 +57,8 @@ _SIC_SECTORS = [
     ((6700, 6799), "Financials"),              # holding/investment
     ((7000, 7299), "Consumer Discretionary"),  # hotels/personal services
     ((7300, 7372), "Information Technology"),   # computer/data services & software
-    ((7373, 7379), "Information Technology"),
-    ((7380, 7899), "Communication Services"),   # advertising/media/entertainment
+    ((7373, 7389), "Information Technology"),   # incl. data processing / payments (V, MA)
+    ((7390, 7899), "Communication Services"),   # advertising/media/entertainment
     ((7900, 7999), "Communication Services"),
     ((8000, 8099), "Health Care"),             # health services
     ((8100, 8999), "Industrials"),             # professional services
