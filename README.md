@@ -32,6 +32,26 @@ frontend (Claude Design)  ->  THIS API  ->  cache (SQLite)
 > holdings logic and made **stdlib-only** so the function and its tests run with
 > zero installs. FastAPI/pandas are needed only for the web server and live SPDR.
 
+### Coverage — any ETF from an accepted issuer
+
+`get_holdings()` no longer needs a ticker to be pre-registered. It **cascades**
+through the daily feeds and returns the first that yields real holdings, then
+falls back to N-PORT:
+
+* **SPDR, Invesco, Vanguard** — the holdings URL is keyed by ticker, so *any* of
+  their ETFs resolves live with no configuration (e.g. `XLE`, `RSP`, `VGT`).
+* **iShares** — needs a numeric product id. Common funds are seeded; everything
+  else is resolved from the live iShares product screener and cached to
+  `.ishares_map.json`. (The screener URL is a `# VERIFY` spot.)
+* **Everything else** (Schwab, other issuers) — routes to the N-PORT fallback,
+  flagged `is_stale`. **The live N-PORT download is still a stub** (`# VERIFY` in
+  `nport_source.py`): the parser is done and works on fixtures, but wiring the
+  SEC EDGAR ticker→CIK→filing lookup is the one piece left for full non-daily
+  coverage. Until then, non-daily issuers return a clear error live.
+
+So live, with `OFFLINE=0`, the backend serves **any iShares / SPDR / Invesco /
+Vanguard ETF**; other issuers need the N-PORT fetch wired.
+
 ---
 
 ## Test the holdings function *without* running the backend

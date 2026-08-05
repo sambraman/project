@@ -17,7 +17,8 @@ import tempfile
 from pathlib import Path
 
 from holdings import (get_holdings, classify_issuer, HoldingsError,
-                      parse_ishares_csv, _normalize_weights, Holding)
+                      parse_ishares_csv, _normalize_weights, Holding,
+                      _candidate_order, resolve_ishares_pid, DAILY_ISSUERS)
 from cache import HoldingsCache
 from nport_source import parse_nport_xml
 
@@ -38,6 +39,22 @@ def main():
     check("QQQ -> invesco", classify_issuer("QQQ") == "invesco")
     check("VTI -> vanguard", classify_issuer("VTI") == "vanguard")
     check("unknown ZZZZ -> nport fallback", classify_issuer("ZZZZ") == "nport")
+
+    print("Cascade order (any-ETF coverage)")
+    check("offline is fixture-bound to a single route",
+          _candidate_order("VTI", offline=True) == ["vanguard"])
+    live_voo = _candidate_order("VOO", offline=False)
+    check("live known ticker leads with its issuer", live_voo[0] == "vanguard")
+    check("live cascade tries every daily feed",
+          set(DAILY_ISSUERS).issubset(set(live_voo)))
+    check("live cascade ends at N-PORT fallback", live_voo[-1] == "nport")
+    unknown = _candidate_order("XYZ", offline=False)
+    check("live unknown ticker still tries all feeds + nport",
+          set(DAILY_ISSUERS).issubset(set(unknown)) and unknown[-1] == "nport")
+    check("iShares pid resolves from seed map (IVV)",
+          resolve_ishares_pid("IVV", offline=True) == "239726")
+    check("iShares pid None offline for unknown (falls through)",
+          resolve_ishares_pid("ZZZZ", offline=True) is None)
 
     print("Per-issuer offline fetch + parse")
     ivv = get_holdings("IVV", offline=True)

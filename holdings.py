@@ -173,27 +173,51 @@ def _parse_date(text: str) -> str:
 # --------------------------------------------------------------------------- #
 # Issuer routing
 # --------------------------------------------------------------------------- #
-# Which issuer owns a ticker. Daily-feed issuers (ishares/spdr/invesco/vanguard)
-# return fresh holdings; anything unknown routes to the N-PORT fallback, which is
-# quarterly and therefore flagged stale. Extend these sets as you confirm URLs.
-ISHARES_TICKERS = {"IVV", "IJH", "IJR", "ITOT", "IWV", "IWB", "IWM", "AGG",
-                   "IEFA", "IEMG", "IWF", "IWD"}
-SPDR_TICKERS    = {"SPY", "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI",
-                   "XLB", "XLU", "XLRE", "XLC", "MDY"}
-INVESCO_TICKERS = {"QQQ", "QQQM", "RSP", "SPHQ", "SPLV"}
-VANGUARD_TICKERS = {"VOO", "VTI", "VEA", "VXUS", "VUG", "VTV", "VO", "VB",
-                    "VIG", "VYM", "BND"}
+# These sets are only a *first guess* at which issuer owns a ticker — they make
+# the common case a single request. They do NOT limit coverage: get_holdings()
+# cascades through every daily-feed issuer for any ticker (see _candidate_order),
+# and three of the four feeds are addressed purely by ticker in the URL, so *any*
+# ETF from SPDR / Invesco / Vanguard resolves without being pre-registered here.
+# iShares needs a product-id lookup (resolved dynamically below); anything no
+# daily feed covers falls through to the quarterly N-PORT fallback (flagged stale).
+DAILY_ISSUERS = ("vanguard", "ishares", "invesco", "spdr")
 
-# iShares needs a numeric product id per fund to build the daily CSV URL. These
-# are stable per fund; extend from the fund's product page URL.  # VERIFY
+ISHARES_TICKERS = {"IVV", "IJH", "IJR", "ITOT", "IWV", "IWB", "IWM", "AGG",
+                   "IEFA", "IEMG", "IWF", "IWD", "IVW", "IVE", "IUSB", "IXUS",
+                   "IJK", "IJJ", "IJS", "IJT", "IWN", "IWO", "IWP", "IWS"}
+SPDR_TICKERS    = {"SPY", "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI",
+                   "XLB", "XLU", "XLRE", "XLC", "MDY", "SPYG", "SPYV", "SPSM",
+                   "SPMD", "DIA", "XBI", "XOP", "XHB", "XRT", "KRE"}
+INVESCO_TICKERS = {"QQQ", "QQQM", "RSP", "SPHQ", "SPLV", "SPHD", "PDP", "QQQJ",
+                   "RPG", "RPV", "XLG"}
+VANGUARD_TICKERS = {"VOO", "VTI", "VEA", "VXUS", "VUG", "VTV", "VO", "VB",
+                    "VIG", "VYM", "BND", "VGT", "VHT", "VNQ", "VWO", "VEU",
+                    "VBR", "VBK", "VOE", "VOT", "MGK", "VV", "VYMI"}
+
+# iShares needs a numeric product id per fund to build the daily CSV URL. This is
+# a *seed* map for the most common funds; resolve_ishares_pid() falls back to the
+# live iShares product screener (cached to .ishares_map.json) for everything else,
+# so any iShares ETF resolves once the screener is confirmed.  # VERIFY
 ISHARES_PRODUCT_IDS = {
     "IVV": "239726", "IJH": "239763", "IJR": "239774", "ITOT": "239724",
     "IWV": "239714", "IWB": "239707", "IWM": "239710", "AGG": "239458",
     "IEFA": "244049", "IEMG": "244050",
 }
 
+# Live catalog of every US iShares fund (ticker -> product id). The exact URL is
+# the one thing to confirm on your machine; the parser below tolerates the two
+# shapes the screener has shipped.  # VERIFY
+ISHARES_SCREENER_URL = (
+    "https://www.ishares.com/us/product-screener/product-screener-v3.1.jsn"
+    "?dcrPath=/templatedata/config/product-screener-v3/data/en/us-ishares/"
+    "ishares-product-screener-backend-config&siteEntPassthrough=true"
+)
+_ISHARES_MAP_CACHE = BASE_DIR / ".ishares_map.json"
+
 
 def classify_issuer(ticker: str) -> str:
+    """First-guess issuer for a ticker (used to order the cascade). Returns one
+    of the daily issuers if the ticker is pre-registered, else 'nport'."""
     t = ticker.upper()
     if t in ISHARES_TICKERS:
         return "ishares"
@@ -204,6 +228,85 @@ def classify_issuer(ticker: str) -> str:
     if t in VANGUARD_TICKERS:
         return "vanguard"
     return "nport"          # universal fallback for every other issuer
+
+
+def _candidate_order(ticker: str, offline: bool) -> list:
+    """The ordered list of issuer methods to try for a ticker.
+
+    Offline is fixture-bound (one file per issuer), so we try only the known
+    route — deterministic for tests. Live, we lead with the best guess, then try
+    the other daily feeds (all safe: SPDR/Invesco/Vanguard are addressed by
+    ticker; a wrong guess just returns nothing and we move on), and finally the
+    N-PORT fallback so nothing dead-ends."""
+    guess = classify_issuer(ticker)
+    if offline:
+        return [guess]
+    if guess == "nport":
+        return list(DAILY_ISSUERS) + ["nport"]
+    return [guess] + [i for i in DAILY_ISSUERS if i != guess] + ["nport"]
+
+
+def _load_ishares_map() -> dict:
+    """Seed map merged over the cached screener catalog (uppercased tickers)."""
+    m = {k.upper(): str(v) for k, v in ISHARES_PRODUCT_IDS.items()}
+    if _ISHARES_MAP_CACHE.exists():
+        try:
+            cached = json.loads(_ISHARES_MAP_CACHE.read_text())
+            m.update({k.upper(): str(v) for k, v in cached.items()})
+        except Exception:
+            pass
+    return m
+
+
+def resolve_ishares_pid(ticker: str, offline: bool):
+    """iShares ticker -> product id. Checks the seed+cache first; on a live miss,
+    fetches the full iShares screener, caches ticker->pid, and retries. Returns
+    None if it can't be resolved (the caller then falls through to N-PORT)."""
+    ticker = ticker.upper()
+    m = _load_ishares_map()
+    if ticker in m:
+        return m[ticker]
+    if offline:
+        return None
+    try:
+        data = json.loads(_http_get(ISHARES_SCREENER_URL, timeout=60))
+    except Exception as e:
+        print(f"Note: iShares screener lookup failed ({type(e).__name__}); "
+              f"{ticker} will fall through to N-PORT.")
+        return None
+    catalog = _parse_ishares_screener(data)
+    if catalog:
+        try:
+            _ISHARES_MAP_CACHE.write_text(json.dumps(catalog))
+        except Exception:
+            pass
+    return catalog.get(ticker)
+
+
+def _parse_ishares_screener(data) -> dict:
+    """Build {ticker: product_id} from the screener JSON. The payload has shipped
+    two shapes; we tolerate both and skip anything we can't read.  # VERIFY"""
+    out = {}
+    if not isinstance(data, dict):
+        return out
+
+    def _cell(v):
+        # Fields are sometimes scalars, sometimes {"r": <value>, "d": <display>}.
+        if isinstance(v, dict):
+            return v.get("r", v.get("d", ""))
+        return v
+
+    for pid, rec in data.items():
+        if not isinstance(rec, dict):
+            continue
+        tick = str(_cell(rec.get("localExchangeTicker"))
+                   or _cell(rec.get("fundTicker")) or "").strip().upper()
+        # Some shapes nest the id in the record instead of using the key.
+        real_pid = str(_cell(rec.get("productPageUrl")) or pid).rstrip("/").split("/")[-1]
+        real_pid = real_pid if real_pid.isdigit() else str(pid)
+        if tick and real_pid.isdigit():
+            out[tick] = real_pid
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -343,11 +446,11 @@ def fetch_ishares(ticker: str, offline: bool) -> HoldingsResult:
     if offline:
         text = _fixture_bytes(f"{ticker.upper()}.ishares.csv").decode("utf-8", "replace")
     else:
-        pid = ISHARES_PRODUCT_IDS.get(ticker.upper())
+        pid = resolve_ishares_pid(ticker, offline)
         if not pid:
             raise HoldingsError(
-                f"iShares product id for {ticker} unknown — add it to "
-                f"ISHARES_PRODUCT_IDS from the fund's product-page URL."
+                f"iShares product id for {ticker} could not be resolved (not in "
+                f"the seed map and the screener lookup didn't return it)."
             )
         # # VERIFY: iShares daily holdings CSV endpoint.
         url = (f"https://www.ishares.com/us/products/{pid}/fund/"
@@ -432,24 +535,42 @@ ISSUER_DISPATCH = {
 def get_holdings(ticker: str, offline: bool | None = None) -> HoldingsResult:
     """Return the full holdings for `ticker`, tagged with the issuer's as-of date.
 
+    Works for *any* ETF from an accepted issuer (iShares, SPDR, Invesco,
+    Vanguard), not just pre-registered tickers: it tries each daily feed in turn
+    and returns the first that yields real holdings, then falls back to N-PORT.
+
     offline: None (default) reads the OFFLINE env var; True forces the bundled
-    fixtures (no network); False forces a live fetch. Raises HoldingsError if the
-    ticker can't be resolved by its issuer's method.
+    fixtures (no network); False forces a live fetch. Raises HoldingsError only
+    if no method — daily feeds or N-PORT — could resolve the ticker.
     """
     ticker = (ticker or "").strip().upper()
     if not ticker:
         raise HoldingsError("ticker is required")
     if offline is None:
         offline = _env_offline()
-    issuer = classify_issuer(ticker)
-    result = ISSUER_DISPATCH[issuer](ticker, offline)
-    if not result.holdings:
-        raise HoldingsError(f"no holdings parsed for {ticker} via {issuer}")
-    if not result.as_of:
-        # Never return an untagged set; fall back to today so downstream joins
-        # and the UI always have an as-of to show (flagged by source anyway).
-        result.as_of = date.today().isoformat()
-    return result
+
+    errors = []
+    for issuer in _candidate_order(ticker, offline):
+        try:
+            result = ISSUER_DISPATCH[issuer](ticker, offline)
+        except HoldingsError as e:
+            errors.append(f"{issuer}: {e}")
+            continue
+        except Exception as e:                       # network / parse hiccup
+            errors.append(f"{issuer}: {type(e).__name__}: {e}")
+            continue
+        if result.holdings:                          # first real hit wins
+            if not result.as_of:
+                # Never return an untagged set; fall back to today so downstream
+                # joins and the UI always have an as-of (source flags freshness).
+                result.as_of = date.today().isoformat()
+            return result
+        errors.append(f"{issuer}: no holdings parsed")
+
+    raise HoldingsError(
+        f"could not resolve holdings for {ticker} from any issuer. Tried: "
+        + "; ".join(errors)
+    )
 
 
 # --------------------------------------------------------------------------- #
