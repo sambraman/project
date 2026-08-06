@@ -90,6 +90,16 @@ class HoldingsResult:
     # Disclosure caveats the caller MUST surface — e.g. a semi-transparent
     # active ETF whose published file is a proxy portfolio, not real holdings.
     warnings: list = field(default_factory=list)
+    # Why the winning source won: every issuer tried and how it failed. Without
+    # this a WAF 403 on the daily feed looks identical to a fund that simply has
+    # no daily file — you silently get quarterly data and never know why.
+    attempts: list = field(default_factory=list)
+
+    @property
+    def degraded(self) -> bool:
+        """True when we wanted a daily feed and settled for quarterly N-PORT."""
+        return self.source == "nport" and any(
+            not a.startswith("nport") for a in self.attempts)
 
     @property
     def count(self):
@@ -104,6 +114,7 @@ class HoldingsResult:
         d["holdings"] = [h.as_dict() for h in self.holdings]
         d["count"] = self.count
         d["total_weight"] = round(self.total_weight, 6)
+        d["degraded"] = self.degraded
         return d
 
 
@@ -301,9 +312,14 @@ def _candidate_order(ticker: str, offline: bool) -> list:
         # so they also allow the N-PORT fixture route rather than dead-ending
         # (this keeps SCHD et al. resolvable offline).
         return [guess, "nport"] if guess in CATALOG_ISSUERS else [guess]
+    # Every daily feed stays in the cascade: a wrong first guess must still
+    # resolve. Requests are NOT wasted, because each catalog-backed fetcher
+    # short-circuits without a network call when its cached catalog positively
+    # says it doesn't list the ticker (see _catalog_lists / fetch_ishares).
     if guess == "nport":
-        return list(DAILY_ISSUERS) + ["nport"]
-    return [guess] + [i for i in DAILY_ISSUERS if i != guess] + ["nport"]
+        return list(DAILY_ISSUERS) + list(CATALOG_ISSUERS) + ["nport"]
+    return ([guess] + [i for i in DAILY_ISSUERS if i != guess]
+            + [i for i in CATALOG_ISSUERS if i != guess] + ["nport"])
 
 
 def _load_ishares_map() -> dict:
@@ -462,6 +478,13 @@ def fetch_ishares(ticker: str, offline: bool) -> HoldingsResult:
     if offline:
         text = _fixture_bytes(f"{ticker.upper()}.ishares.csv").decode("utf-8", "replace")
     else:
+        # iShares is the strict-WAF host (8/60s). If the cached catalog proves
+        # this isn't an iShares fund, decline before spending a token.
+        if _catalog_lists("ishares", ticker) is False and \
+                ticker.upper() not in ISHARES_PRODUCT_IDS:
+            raise HoldingsError(
+                f"{ticker.upper()} is not in the cached iShares catalog "
+                f"(skipped without a request)")
         pid = resolve_ishares_pid(ticker, offline)
         if not pid:
             raise HoldingsError(
@@ -627,12 +650,30 @@ def _disclosure_warnings(issuer: str, ticker: str) -> list:
     return warns
 
 
+def _catalog_lists(issuer: str, ticker: str):
+    """Tri-state: True/False if a cached catalog positively answers, else None
+    (unknown — no cache yet, so the caller must try the network).
+
+    This is where the rate-limit saving lives. The cascade still *offers* every
+    issuer, but a fetcher can decline instantly when the cached catalog proves
+    the ticker isn't in that lineup — no request spent, no WAF budget burned.
+    """
+    cat = issuer_catalog.load_cached(issuer)
+    if not cat:
+        return None
+    return ticker.upper() in cat
+
+
 def _make_catalog_fetcher(issuer: str):
     def _fetch(ticker: str, offline: bool) -> HoldingsResult:
         t = ticker.upper()
         if offline:
             text = _fixture_bytes(f"{t}.{issuer}.csv").decode("utf-8", "replace")
         else:
+            if _catalog_lists(issuer, t) is False:
+                raise HoldingsError(
+                    f"{t} is not in the cached {issuer} catalog (skipped without "
+                    f"a request)")
             pid = issuer_catalog.resolve(issuer, t)
             if not pid:
                 raise HoldingsError(f"{t} not found in the {issuer} catalog")
@@ -693,6 +734,15 @@ def get_holdings(ticker: str, offline: bool | None = None) -> HoldingsResult:
                 # Never return an untagged set; fall back to today so downstream
                 # joins and the UI always have an as-of (source flags freshness).
                 result.as_of = date.today().isoformat()
+            # Carry the trail of what failed onto the winner. A daily feed that
+            # got WAF-blocked must not look like a fund that has no daily file.
+            result.attempts = list(errors)
+            if result.degraded:
+                msg = (f"{ticker}: daily feed unavailable, served STALE "
+                       f"quarterly N-PORT (as of {result.as_of}). Failures: "
+                       + "; ".join(errors))
+                result.warnings.append(msg)
+                print(f"  \u26a0 {msg}")
             return result
         errors.append(f"{issuer}: no holdings parsed")
 

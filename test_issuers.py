@@ -68,8 +68,63 @@ def main():
         assert iss in issuer_catalog.CATALOGS, f"{iss} has no catalog entry"
     print("  \u2713 every dispatch issuer has a catalog endpoint configured")
 
+    test_degradation()
+
     print("\nISSUER CHECKS PASS")
     return 0
+
+
+
+
+def test_degradation():
+    """The actual bug behind 'IVV shows 9/30/2025': a daily feed that fails must
+    not silently masquerade as a fund with no daily file."""
+    print("\nSilent-degradation detection")
+
+    # nport result reached only after other issuers were tried == degraded
+    r = holdings.HoldingsResult("IVV", "2025-09-30", "nport", True, [],
+                                attempts=["ishares: HTTP 403"])
+    assert r.degraded is True
+    print("  \u2713 nport-after-failures is flagged degraded")
+
+    # nport with nothing else tried is a legitimate route, not a degradation
+    r2 = holdings.HoldingsResult("ZZZZ", "2025-09-30", "nport", True, [],
+                                 attempts=[])
+    assert r2.degraded is False
+    print("  \u2713 straight-to-nport is not falsely flagged")
+
+    # a working daily feed is never degraded
+    r3 = holdings.HoldingsResult("IVV", "2026-08-04", "ishares", False, [],
+                                 attempts=[])
+    assert r3.degraded is False
+    print("  \u2713 healthy daily feed is not flagged")
+
+    d = r.as_dict()
+    assert d["degraded"] is True and d["attempts"] == ["ishares: HTTP 403"], d
+    assert "attempts" in d, "the failure trail must reach the API layer"
+    print("  \u2713 degraded + attempts serialize to the API")
+
+    # catalog short-circuit: cached catalog that excludes the ticker => skip
+    import issuer_catalog as ic, tempfile, pathlib
+    orig = ic.CACHE_DIR
+    try:
+        ic.CACHE_DIR = pathlib.Path(tempfile.mkdtemp())
+        ic.save_cached("vaneck", {"GDX": "1"})
+        assert holdings._catalog_lists("vaneck", "SMH") is False
+        assert holdings._catalog_lists("vaneck", "GDX") is True
+        assert holdings._catalog_lists("globalx", "SMH") is None, \
+            "no cache must read as unknown, not as absent"
+        print("  \u2713 catalog membership is tri-state (present/absent/unknown)")
+    finally:
+        ic.CACHE_DIR = orig
+
+    # the cascade contract from smoke_test must survive
+    order = holdings._candidate_order("VOO", offline=False)
+    assert set(holdings.DAILY_ISSUERS).issubset(set(order)), order
+    assert order[-1] == "nport" and order[0] == "vanguard"
+    print("  \u2713 cascade still offers every daily feed, ending at N-PORT")
+
+    print("\nDEGRADATION CHECKS PASS")
 
 
 if __name__ == "__main__":
