@@ -28,7 +28,7 @@ import re
 import ssl
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 try:
@@ -143,19 +143,70 @@ def _load_fund_directory() -> dict:
     return out
 
 
-def _latest_nport_accession(series: str):
-    """Return (trust_cik, accession_no_dashes) for the fund series' most recent
-    NPORT-P filing, or (None, None). EDGAR accepts a Series ID in the CIK slot."""
+def _parse_atom_entries(atom: str):
+    """[(accession, cik, filing_date, report_date)] parsed ENTRY BY ENTRY.
+
+    The old code ran re.findall over the whole document, so accession[0] and
+    CIK[0] came from unrelated places — the atom header carries CIK= links
+    before any filing entry, so the CIK could belong to the feed, not the
+    filing. Splitting on <entry> keeps each filing's fields together.
+    """
+    out = []
+    for chunk in re.split(r"<entry[\s>]", atom)[1:]:
+        acc = re.search(r"accession-n(?:umber|unber)>([\d-]+)<", chunk)
+        if not acc:
+            continue
+        cik = re.search(r"CIK=(\d+)", chunk)
+        filed = re.search(r"filing-date>([\d-]+)<", chunk)
+        report = re.search(r"(?:report|period)-date>([\d-]+)<", chunk)
+        out.append((acc.group(1).replace("-", ""),
+                    cik.group(1) if cik else None,
+                    filed.group(1) if filed else "",
+                    report.group(1) if report else ""))
+    return out
+
+
+def _nport_candidates(series: str, count: int = 40):
+    """Candidate NPORT-P filings for a series, NEWEST REPORTING PERIOD FIRST.
+
+    Why not just take the first filing EDGAR returns: filing order is not
+    period order. An amendment (NPORT-P/A) restating an old quarter can be
+    filed after a newer original, and a stale pick is invisible downstream —
+    which is exactly how IVV ended up served as of 2025-09-30. Sorting on the
+    report date (falling back to filing date) makes the choice correct
+    regardless of how EDGAR happens to order the feed.
+    """
     atom = _get(
         "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
-        f"&CIK={series}&type=NPORT-P&dateb=&owner=include&count=1&output=atom"
+        f"&CIK={series}&type=NPORT-P&dateb=&owner=include&count={count}"
+        "&output=atom"
     ).decode("utf-8", "replace")
-    accs = re.findall(r"accession-number>([\d-]+)<", atom)
-    ciks = re.findall(r"CIK=(\d+)", atom)
-    if not accs:
+    entries = _parse_atom_entries(atom)
+    # Sort key: report date if the feed gave one, else filing date.
+    entries.sort(key=lambda e: (e[3] or e[2] or ""), reverse=True)
+    return entries
+
+
+def _latest_nport_accession(series: str):
+    """(trust_cik, accession) for the most recent NPORT-P. Kept for
+    compatibility; prefer _nport_candidates for the full ranked list."""
+    cands = _nport_candidates(series, count=40)
+    if not cands:
         return None, None
-    cik = ciks[0] if ciks else None
-    return cik, accs[0].replace("-", "")
+    acc, cik, _filed, _report = cands[0]
+    return cik, acc
+
+
+MAX_NPORT_PROBES = 4
+FRESH_PERIOD_DAYS = 135      # a current quarterly filing is ~60-120 days back
+
+
+def _period_age_days(as_of: str):
+    try:
+        y, m, d = map(int, str(as_of).split("-"))
+        return (date.today() - date(y, m, d)).days
+    except Exception:
+        return None
 
 
 def _live_nport_rows(ticker: str):
@@ -166,14 +217,43 @@ def _live_nport_rows(ticker: str):
             f"{ticker} not found in the SEC fund directory (not an SEC-registered "
             f"fund, or a UIT like SPY that files separately)."
         )
-    trust_cik, acc = _latest_nport_accession(rec["series"])
-    if not acc:
-        raise LookupError(f"no NPORT-P filing found for {ticker} (series {rec['series']}).")
-    cik = trust_cik or rec["cik"]
-    base = f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/"
-    # primary_doc.xml is the N-PORT payload in every current filing.
-    raw = _get(base + "primary_doc.xml")
-    return parse_nport_xml(raw)
+    cands = _nport_candidates(rec["series"])
+    if not cands:
+        raise LookupError(
+            f"no NPORT-P filing found for {ticker} (series {rec['series']}).")
+
+    # Walk candidates newest-first and VERIFY the period inside each document.
+    # The feed's ordering is a hint, not proof; the filing itself is the truth.
+    # Stop as soon as one is genuinely current, so the normal case costs one
+    # request and only a stale-looking result triggers extra probes.
+    best = None
+    for acc, trust_cik, filed, _report in cands[:MAX_NPORT_PROBES]:
+        cik = trust_cik or rec["cik"]
+        try:
+            raw = _get(f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/"
+                       "primary_doc.xml")
+            as_of, rows = parse_nport_xml(raw)
+        except Exception:
+            continue
+        if not rows:
+            continue
+        if best is None or (as_of or "") > (best[0] or ""):
+            best = (as_of, rows, filed)
+        age = _period_age_days(as_of)
+        if age is not None and age <= FRESH_PERIOD_DAYS:
+            break            # current enough; no need to look further
+
+    if best is None:
+        raise LookupError(f"no parsable NPORT-P document for {ticker}.")
+
+    as_of, rows, filed = best
+    age = _period_age_days(as_of)
+    if age is not None and age > FRESH_PERIOD_DAYS:
+        print(f"  \u26a0 {ticker}: newest N-PORT period is {as_of} ({age} days "
+              f"old, filed {filed}). The fund may have stopped filing under "
+              f"this series, or the daily issuer feed is the only current "
+              f"source.")
+    return as_of, rows
 
 
 def nport_fetch(ticker: str, offline: bool = False, fixtures_dir: Path | None = None):
