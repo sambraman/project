@@ -45,6 +45,9 @@ from dataclasses import dataclass, field, asdict
 from datetime import date, datetime
 from pathlib import Path
 
+from ratelimit import polite_get
+import issuer_catalog
+
 try:
     import certifi
     _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
@@ -84,6 +87,9 @@ class HoldingsResult:
     source: str                      # ishares | spdr | invesco | vanguard | nport
     is_stale: bool                   # True for quarterly (N-PORT) sources
     holdings: list = field(default_factory=list)
+    # Disclosure caveats the caller MUST surface — e.g. a semi-transparent
+    # active ETF whose published file is a proxy portfolio, not real holdings.
+    warnings: list = field(default_factory=list)
 
     @property
     def count(self):
@@ -113,13 +119,17 @@ def _env_offline() -> bool:
 
 
 def _http_get(url: str, timeout: int = 60, headers: dict | None = None) -> bytes:
-    """GET a URL and return the raw bytes. Raises on failure."""
+    """GET a URL and return the raw bytes. Raises on failure.
+
+    Every issuer request funnels through here, so this is where per-host pacing
+    belongs: ratelimit.polite_get blocks until the host's token bucket allows
+    the call, then backs off on 429/503 honoring Retry-After. iShares is capped
+    at 8/60s (their ceiling is 10) so a retry can't tip us over.
+    """
     hdrs = dict(HTTP_HEADERS)
     if headers:
         hdrs.update(headers)
-    req = urllib.request.Request(url, headers=hdrs)
-    with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
-        return resp.read()
+    return polite_get(url, timeout=timeout, headers=hdrs)
 
 
 def _fixture_bytes(name: str) -> bytes:
@@ -206,6 +216,38 @@ VANGUARD_TICKERS = {"VOO", "VTI", "VEA", "VXUS", "VUG", "VTV", "VO", "VB",
                     "VIG", "VYM", "BND", "VGT", "VHT", "VNQ", "VWO", "VEU",
                     "VBR", "VBK", "VOE", "VOT", "MGK", "VV", "VYMI"}
 
+# --- passive shops added via the product-catalog route ---------------------- #
+# SCHD is in the default TRACKED_TICKERS and was previously falling all the way
+# through to quarterly N-PORT; Schwab publishes daily.
+SCHWAB_TICKERS  = {"SCHD", "SCHX", "SCHB", "SCHG", "SCHF", "SCHE", "SCHA",
+                   "SCHV", "SCHM", "SCHH", "SCHP", "SCHR", "SCHZ", "SCHI",
+                   "SCHJ", "SCHK", "SCHY", "SCHQ", "FNDX", "FNDA", "FNDF"}
+VANECK_TICKERS  = {"SMH", "GDX", "GDXJ", "MOAT", "PPH", "OIH", "ESPO", "BBH",
+                   "REMX", "SMOG", "IGRA", "MOTI", "AMLP"}
+GLOBALX_TICKERS = {"LIT", "URA", "BOTZ", "SNSR", "QYLD", "XYLD", "RYLD",
+                   "COPX", "SIL", "PAVE", "AIQ", "DRIV", "CLOU"}
+WISDOMTREE_TICKERS = {"DGRW", "DXJ", "HEDJ", "DES", "DLN", "EPS", "DFE",
+                      "DEM", "DGS", "USFR", "AGGY", "WTV"}
+FIRSTTRUST_TICKERS = {"FDN", "FXL", "FXH", "FTCS", "FTSM", "SKYY", "CIBR",
+                      "QCLN", "GRID", "FPX", "FDL", "FVD", "FTGC", "RDVY"}
+
+# --- active shops ------------------------------------------------------------ #
+# Fully transparent active ETFs: real holdings, published daily. Their sibling
+# MUTUAL funds are quarterly N-PORT only — a completely different data contract.
+CAPGROUP_TICKERS = {"CGGR", "CGDV", "CGUS", "CGXU", "CGGO", "CGIE", "CGCP",
+                    "CGMS", "CGSM", "CGCB", "CGIB", "CGNG", "CGHM", "CGVE",
+                    "CGBL", "CGDG", "CGRO", "CGW"}
+# T. Rowe Price: TCAF is transparent; the semi-transparent ones publish a PROXY
+# portfolio and are flagged at fetch time (see issuer_catalog.ACTIVE_DISCLOSURE).
+TROWE_TICKERS = {"TCAF", "TCHP", "TDVG", "TEQI", "TGRT", "TSPA", "TSEC", "THYF"}
+
+CATALOG_ISSUERS = {
+    "schwab": SCHWAB_TICKERS, "vaneck": VANECK_TICKERS,
+    "globalx": GLOBALX_TICKERS, "wisdomtree": WISDOMTREE_TICKERS,
+    "firsttrust": FIRSTTRUST_TICKERS, "capitalgroup": CAPGROUP_TICKERS,
+    "troweprice": TROWE_TICKERS,
+}
+
 # iShares needs a numeric product id per fund to build the daily CSV URL. This is
 # a *seed* map for the most common funds; resolve_ishares_pid() falls back to the
 # live iShares product screener (cached to .ishares_map.json) for everything else,
@@ -239,6 +281,9 @@ def classify_issuer(ticker: str) -> str:
         return "invesco"
     if t in VANGUARD_TICKERS:
         return "vanguard"
+    for issuer, tickers in CATALOG_ISSUERS.items():
+        if t in tickers:
+            return issuer
     return "nport"          # universal fallback for every other issuer
 
 
@@ -252,7 +297,10 @@ def _candidate_order(ticker: str, offline: bool) -> list:
     N-PORT fallback so nothing dead-ends."""
     guess = classify_issuer(ticker)
     if offline:
-        return [guess]
+        # Fixture-bound and deterministic. The catalog issuers ship no fixtures,
+        # so they also allow the N-PORT fixture route rather than dead-ending
+        # (this keeps SCHD et al. resolvable offline).
+        return [guess, "nport"] if guess in CATALOG_ISSUERS else [guess]
     if guess == "nport":
         return list(DAILY_ISSUERS) + ["nport"]
     return [guess] + [i for i in DAILY_ISSUERS if i != guess] + ["nport"]
@@ -280,19 +328,14 @@ def resolve_ishares_pid(ticker: str, offline: bool):
         return m[ticker]
     if offline:
         return None
-    try:
-        data = json.loads(_http_get(ISHARES_SCREENER_URL, timeout=60))
-    except Exception as e:
-        print(f"Note: iShares screener lookup failed ({type(e).__name__}); "
-              f"{ticker} will fall through to N-PORT.")
-        return None
-    catalog = _parse_ishares_screener(data)
-    if catalog:
-        try:
-            _ISHARES_MAP_CACHE.write_text(json.dumps(catalog))
-        except Exception:
-            pass
-    return catalog.get(ticker)
+    # One rate-limited screener call per CATALOG_TTL_HOURS, shared across every
+    # ticker, instead of a fetch per cache miss. This is the fix for the
+    # 10-req/60s ceiling: N discovery calls collapse to 1.
+    pid = issuer_catalog.resolve("ishares", ticker)
+    if pid:
+        return pid
+    print(f"Note: {ticker} not in the iShares catalog; falling through to N-PORT.")
+    return None
 
 
 def _parse_ishares_screener(data) -> dict:
@@ -546,12 +589,72 @@ def fetch_nport(ticker: str, offline: bool) -> HoldingsResult:
     return HoldingsResult(ticker.upper(), as_of, "nport", True, _finalize(holdings))
 
 
+# --------------------------------------------------------------------------- #
+# Catalog-driven issuers (Schwab, VanEck, Global X, WisdomTree, First Trust,
+# Capital Group, T. Rowe Price)
+#
+# All share one shape: resolve ticker -> product id from the cached catalog
+# (one rate-limited call per issuer per day), then pull that fund's daily
+# holdings file. Failure is non-fatal by design — the cascade in get_holdings
+# falls through to N-PORT, so a wrong endpoint degrades to quarterly data
+# rather than breaking the ticker.
+#
+# # VERIFY — confirm each holdings URL template against live traffic (devtools
+# -> Network -> XHR on the fund's holdings tab) before trusting it.
+# --------------------------------------------------------------------------- #
+CATALOG_HOLDINGS_URLS = {
+    "schwab":       "https://www.schwabassetmanagement.com/api/fund/{pid}/holdings?format=csv",
+    "vaneck":       "https://www.vaneck.com/api/products/us/etf/{pid}/holdings/?format=csv",
+    "globalx":      "https://www.globalxetfs.com/api/funds/{pid}/holdings.csv",
+    "wisdomtree":   "https://www.wisdomtree.com/api/etfs/{pid}/holdings.csv",
+    "firsttrust":   "https://www.ftportfolios.com/api/products/etf/{pid}/holdings.csv",
+    "capitalgroup": "https://www.capitalgroup.com/api/etf/{pid}/holdings?format=csv",
+    "troweprice":   "https://www.troweprice.com/api/products/etf/{pid}/holdings.csv",
+}
+
+
+def _disclosure_warnings(issuer: str, ticker: str) -> list:
+    """Caveats that must travel with the data, not sit in a README."""
+    warns = []
+    if ticker.upper() in issuer_catalog.SEMI_TRANSPARENT_TICKERS:
+        warns.append(
+            f"{ticker.upper()} is a SEMI-TRANSPARENT active ETF: the published "
+            f"file is a PROXY portfolio, not the fund's actual holdings. Do not "
+            f"present it as real look-through exposure.")
+    note = issuer_catalog.ACTIVE_DISCLOSURE.get(issuer)
+    if note and ticker.upper() not in issuer_catalog.SEMI_TRANSPARENT_TICKERS:
+        warns.append(note[2])
+    return warns
+
+
+def _make_catalog_fetcher(issuer: str):
+    def _fetch(ticker: str, offline: bool) -> HoldingsResult:
+        t = ticker.upper()
+        if offline:
+            text = _fixture_bytes(f"{t}.{issuer}.csv").decode("utf-8", "replace")
+        else:
+            pid = issuer_catalog.resolve(issuer, t)
+            if not pid:
+                raise HoldingsError(f"{t} not found in the {issuer} catalog")
+            url = CATALOG_HOLDINGS_URLS[issuer].format(pid=pid)
+            text = _http_get(url, headers=_BROWSER_HEADERS).decode("utf-8", "replace")
+        # These feeds ship the same preamble+header CSV shape as iShares.
+        as_of, holdings = parse_ishares_csv(text)
+        if not holdings:
+            raise HoldingsError(f"no holdings parsed for {t} from {issuer}")
+        return HoldingsResult(t, as_of, issuer, False, _finalize(holdings),
+                              _disclosure_warnings(issuer, t))
+    _fetch.__name__ = f"fetch_{issuer}"
+    return _fetch
+
+
 ISSUER_DISPATCH = {
     "ishares": fetch_ishares,
     "spdr": fetch_spdr,
     "invesco": fetch_invesco,
     "vanguard": fetch_vanguard,
     "nport": fetch_nport,
+    **{iss: _make_catalog_fetcher(iss) for iss in CATALOG_HOLDINGS_URLS},
 }
 
 

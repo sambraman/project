@@ -10,3 +10,4 @@ __pycache__/
 raw_cache/
 fundamentals.csv
 universe.txt
+.catalog_cache/

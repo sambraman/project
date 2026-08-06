@@ -19,6 +19,7 @@ import sys
 
 from cache import HoldingsCache
 from holdings import get_holdings, HoldingsError
+import issuer_catalog
 
 DEFAULT_TRACKED = "IVV,QQQ,SPY,VTI,VOO,SCHD"
 
@@ -33,6 +34,17 @@ def refresh(tickers=None, offline=None, cache=None):
     failing ticker never aborts the run."""
     tickers = tickers or tracked_tickers()
     cache = cache or HoldingsCache()
+
+    # Warm every issuer catalog FIRST: one rate-limited call per issuer, cached
+    # for CATALOG_TTL_HOURS. Without this, each unseen ticker triggers its own
+    # discovery call and a wide refresh can blow through a 10-req/60s budget.
+    if not offline:
+        try:
+            issuer_catalog.warm_all()
+        except Exception as e:
+            print(f"Note: catalog warm-up failed ({type(e).__name__}); "
+                  f"continuing with cached/seed maps.")
+
     results = []
     for t in tickers:
         try:
