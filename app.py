@@ -12,6 +12,7 @@ Endpoints
   GET  /holdings?ticker=IVV     full holdings (cache-first, live on miss)
   GET  /tickers                 what's cached and how fresh
   POST /refresh                 refresh tracked tickers (needs x-refresh-token)
+  GET  /kpis?ticker=MSFT        sector-specific KPIs (capex/RPO, NIM, combined ratio)
   GET  /prices?ticker=IVV       daily price history (omit ticker for a summary)
   POST /refresh-prices          pull daily EOD bars (needs x-refresh-token)
 
@@ -35,6 +36,7 @@ from price_cache import PriceCache
 from holdings import get_holdings, HoldingsError, classify_issuer
 from fundamentals import get_fundamentals, get_classification, get_history
 from store import FundamentalsStore, DEFAULT_PATH as STORE_PATH
+from sector_kpis import compute_sector_kpis
 import refresh as refresh_mod
 import refresh_prices as refresh_prices_mod
 
@@ -191,6 +193,29 @@ def do_refresh(x_refresh_token: str = Header(default="")):
         raise HTTPException(status_code=401, detail="bad or missing x-refresh-token")
     results = refresh_mod.refresh(offline=OFFLINE, cache=CACHE)
     return {"refreshed": results}
+
+
+@app.get("/kpis")
+def kpis(ticker: str = Query(..., min_length=1),
+         sector: str = Query(default="", description="override auto-detection: "
+                             "hyperscalers | banks | insurance | semiconductors "
+                             "| reits | utilities")):
+    """Sector-specific KPIs from XBRL — the metrics an analyst covering that
+    vertical actually pulls (hyperscaler capex/RPO, bank NIM/efficiency,
+    insurance combined ratio) rather than sector-blind generic ratios.
+
+    Every KPI carries `basis` (tag | derived | unavailable) and the `tag` it was
+    read from, so each number is auditable. `coverage` is the share that
+    resolved. Read `warnings` — they flag approximations (bank NIM) and data
+    that genuinely isn't in companyfacts (cloud segment revenue).
+    """
+    try:
+        res = compute_sector_kpis(ticker, sector=sector or None)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}")
+    return res.as_dict()
 
 
 @app.get("/prices")
