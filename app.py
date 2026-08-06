@@ -38,7 +38,7 @@ from holdings import get_holdings, HoldingsError, classify_issuer
 from fundamentals import get_fundamentals, get_classification, get_history
 from store import FundamentalsStore, DEFAULT_PATH as STORE_PATH
 from sector_kpis import compute_sector_kpis
-from datastore import STORE
+from datastore import STORE as DATA_STORE   # unified cache; NOT FundamentalsStore
 import refresh as refresh_mod
 import refresh_prices as refresh_prices_mod
 
@@ -81,7 +81,7 @@ def holdings(ticker: str = Query(..., min_length=1),
     """
     ticker = ticker.upper().strip()
     if not refresh:
-        stored = STORE.get_holdings(ticker)
+        stored = DATA_STORE.get_holdings(ticker)
         if stored:
             stored["issuer_route"] = classify_issuer(ticker)
             return stored
@@ -93,7 +93,7 @@ def holdings(ticker: str = Query(..., min_length=1),
         result = get_holdings(ticker, offline=OFFLINE)
     except HoldingsError as e:
         # Last resort: anything previously stored beats a hard failure.
-        stored = STORE.get_holdings(ticker)
+        stored = DATA_STORE.get_holdings(ticker)
         if stored:
             stored["issuer_route"] = classify_issuer(ticker)
             stored["warnings"] = list(stored.get("warnings") or []) + [
@@ -102,7 +102,7 @@ def holdings(ticker: str = Query(..., min_length=1),
         raise HTTPException(status_code=404, detail=str(e))
     CACHE.put(result)
     try:
-        STORE.put_holdings(result)
+        DATA_STORE.put_holdings(result)
     except Exception:
         pass                      # persistence must never break a response
     payload = result.as_dict()
@@ -231,7 +231,7 @@ def kpis(ticker: str = Query(..., min_length=1),
     # Store-first: filings are quarterly, so a cached KPI payload is valid for
     # a week. This turns a multi-second EDGAR walk into a single SQLite read.
     if sector:
-        hit = STORE.get_kpis(t, sector)
+        hit = DATA_STORE.get_kpis(t, sector)
         if hit and hit.get("fresh"):
             return hit
     try:
@@ -240,7 +240,7 @@ def kpis(ticker: str = Query(..., min_length=1),
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         for sec in (sector, "hyperscalers", "banks", "insurance"):
-            hit = STORE.get_kpis(t, sec) if sec else None
+            hit = DATA_STORE.get_kpis(t, sec) if sec else None
             if hit:
                 hit["warnings"] = list(hit.get("warnings") or []) + [
                     f"Live computation failed ({type(e).__name__}); serving "
@@ -249,7 +249,7 @@ def kpis(ticker: str = Query(..., min_length=1),
         raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}")
     payload = res.as_dict()
     try:
-        STORE.put_kpis(t, res.sector, res.period, payload)
+        DATA_STORE.put_kpis(t, res.sector, res.period, payload)
     except Exception:
         pass
     return payload
@@ -259,7 +259,7 @@ def kpis(ticker: str = Query(..., min_length=1),
 def stats():
     """What's actually in the store and how fresh — the ops view. Use this to
     confirm the nightly refresh is landing instead of guessing from the UI."""
-    return STORE.stats()
+    return DATA_STORE.stats()
 
 
 @app.get("/prices")

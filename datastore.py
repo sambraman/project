@@ -86,9 +86,24 @@ class Entry:
 class DataStore:
     def __init__(self, path=None):
         self.path = str(path or DB_PATH)
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self.degraded = False
         self._lock = threading.Lock()
-        self._init()
+        try:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            self._init()
+        except Exception as e:
+            # A read-only or missing DATA_DIR must NOT take the whole service
+            # down at import time. Fall back to a scratch DB: the app still
+            # serves (just without persistence across restarts) and /stats
+            # reports degraded=True so the cause is visible.
+            import tempfile
+            fallback = Path(tempfile.gettempdir()) / "lookthrough-fallback.db"
+            print(f"WARNING: datastore at {self.path} unusable ({e}). "
+                  f"Falling back to {fallback} — data will NOT persist across "
+                  f"restarts. Set DATA_DIR to a writable persistent disk.")
+            self.path = str(fallback)
+            self.degraded = True
+            self._init()
 
     def _connect(self):
         conn = sqlite3.connect(self.path, timeout=30)
@@ -293,7 +308,10 @@ class DataStore:
 
     # --- ops -------------------------------------------------------------- #
     def stats(self) -> dict:
-        out = {}
+        out = {"db_path": self.path, "degraded": self.degraded}
+        if self.degraded:
+            out["warning"] = ("Storage is a temp fallback — data will be lost on "
+                              "restart. Set DATA_DIR to a writable persistent disk.")
         with self._connect() as c:
             for t in ("kv", "holdings", "holdings_meta", "prices", "kpis"):
                 out[t] = c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
