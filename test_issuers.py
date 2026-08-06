@@ -64,9 +64,36 @@ def main():
     print("  \u2713 warnings serialize through as_dict() to the API")
 
     # --- catalog wiring ----------------------------------------------------- #
+    entries = issuer_catalog._all_catalog_entries()
     for iss in holdings.CATALOG_HOLDINGS_URLS:
-        assert iss in issuer_catalog.CATALOGS, f"{iss} has no catalog entry"
-    print("  \u2713 every dispatch issuer has a catalog endpoint configured")
+        assert iss in entries, f"{iss} has no catalog endpoint in the registry"
+    print("  \u2713 every dispatch issuer has a registry endpoint")
+
+    # Unverified issuers must NOT pollute the live cascade — diagnose.py showed
+    # all seven failing on every single lookup.
+    verified = issuer_catalog.verified_issuers()
+    for tick in ("IVV", "SMH", "ZZZZ"):
+        order = holdings._candidate_order(tick, offline=False)
+        bad = [i for i in order
+               if i in holdings.CATALOG_ISSUERS and i not in verified]
+        assert not bad, f"{tick} cascade includes unverified {bad}"
+    print(f"  \u2713 unverified issuers excluded from the cascade "
+          f"(verified: {verified})")
+    assert len(holdings._candidate_order("IVV", offline=False)) <= 6
+    print("  \u2713 IVV cascade trimmed to <=6 hops (was 12)")
+
+    # The Invesco crash: DictReader restkey is a LIST, and .strip() on it blew
+    # up on EVERY ticker because invesco sits in every cascade.
+    try:
+        holdings.parse_invesco_csv("a,b,c\n1,2,3,4,5\n")
+        raise AssertionError("should have raised HoldingsError")
+    except holdings.HoldingsError:
+        pass
+    print("  \u2713 Invesco parser fails cleanly on a non-CSV response")
+    _a, _h = holdings.parse_invesco_csv(
+        "Holding Ticker,Name,Weight,Date\nAAPL,Apple,7.05,08/04/2026\n")
+    assert _h[0].ticker == "AAPL" and _a == "2026-08-04"
+    print("  \u2713 Invesco parser still parses a valid CSV")
 
     test_degradation()
 

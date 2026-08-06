@@ -1,0 +1,81 @@
+{
+  "_README": [
+    "Issuer endpoint registry. Edit this file — no code change, no redeploy.",
+    "",
+    "verified=false keeps an issuer OUT of the live cascade entirely, so a",
+    "broken URL can't slow down or pollute every lookup. Everything below is",
+    "false because the URLs are UNCONFIRMED guesses that all failed in",
+    "diagnose.py (schwab 404, vaneck 302 loop, globalx 404, wisdomtree 403,",
+    "firsttrust 404, capitalgroup 404, troweprice 502).",
+    "",
+    "TO ENABLE ONE:",
+    "  1. Open the issuer's fund page in a browser, devtools -> Network -> XHR.",
+    "  2. Click the holdings tab / download link. Copy the request URL.",
+    "  3. Paste it into catalog_url or holdings_url ({pid} = product id).",
+    "  4. python issuer_catalog.py --probe <issuer>     (tests it, no commit)",
+    "  5. Set verified=true once the probe passes.",
+    "",
+    "iShares note: the catalog URL is the product screener; holdings_url is the",
+    "per-fund .ajax CSV. diagnose.py showed the CSV endpoint returning an HTML",
+    "challenge page, so the holdings_url below likely needs the fund SLUG in",
+    "place of the literal 'fund' segment, e.g. /us/products/239726/",
+    "ishares-core-sp-500-etf/1467271812596.ajax?... Confirm in devtools."
+  ],
+
+  "ishares": {
+    "verified": true,
+    "catalog_url": "https://www.ishares.com/us/product-screener/product-screener-v3.1.jsn?dcrPath=/templatedata/config/product-screener-v3/data/en/us-ishares/ishares-product-screener-backend-config&siteEntPassthrough=true",
+    "holdings_url": "https://www.ishares.com/us/products/{pid}/fund/1467271812596.ajax?fileType=csv&fileName={ticker}_holdings&dataType=fund",
+    "parser": "ishares",
+    "note": "Bot-protected. Returns HTML challenge instead of CSV — see README."
+  },
+  "schwab": {
+    "verified": false,
+    "catalog_url": "https://www.schwabassetmanagement.com/api/fund-data/all-etfs",
+    "holdings_url": "https://www.schwabassetmanagement.com/api/fund/{pid}/holdings?format=csv",
+    "parser": "ishares",
+    "note": "catalog 404 in diagnose.py — URL unconfirmed."
+  },
+  "vaneck": {
+    "verified": false,
+    "catalog_url": "https://www.vaneck.com/api/products/us/etf/list/",
+    "holdings_url": "https://www.vaneck.com/api/products/us/etf/{pid}/holdings/?format=csv",
+    "parser": "ishares",
+    "note": "302 redirect loop — likely needs a different path or cookies."
+  },
+  "globalx": {
+    "verified": false,
+    "catalog_url": "https://www.globalxetfs.com/api/funds/",
+    "holdings_url": "https://www.globalxetfs.com/api/funds/{pid}/holdings.csv",
+    "parser": "ishares",
+    "note": "catalog 404 — URL unconfirmed."
+  },
+  "wisdomtree": {
+    "verified": false,
+    "catalog_url": "https://www.wisdomtree.com/api/etfs/list",
+    "holdings_url": "https://www.wisdomtree.com/api/etfs/{pid}/holdings.csv",
+    "parser": "ishares",
+    "note": "403 — bot protection or wrong path."
+  },
+  "firsttrust": {
+    "verified": false,
+    "catalog_url": "https://www.ftportfolios.com/api/products/etf",
+    "holdings_url": "https://www.ftportfolios.com/api/products/etf/{pid}/holdings.csv",
+    "parser": "ishares",
+    "note": "catalog 404 — URL unconfirmed."
+  },
+  "capitalgroup": {
+    "verified": false,
+    "catalog_url": "https://www.capitalgroup.com/api/etf/products",
+    "holdings_url": "https://www.capitalgroup.com/api/etf/{pid}/holdings?format=csv",
+    "parser": "ishares",
+    "note": "catalog 404 — URL unconfirmed."
+  },
+  "troweprice": {
+    "verified": false,
+    "catalog_url": "https://www.troweprice.com/api/products/etf/list",
+    "holdings_url": "https://www.troweprice.com/api/products/etf/{pid}/holdings.csv",
+    "parser": "ishares",
+    "note": "502 — URL unconfirmed."
+  }
+}

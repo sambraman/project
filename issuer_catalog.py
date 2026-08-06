@@ -129,38 +129,54 @@ CATALOGS = {
         "ishares-product-screener-backend-config&siteEntPassthrough=true",
         parse_ishares_catalog,
     ),
-    # Passive shops not previously covered.  # VERIFY each URL
-    "schwab": (
-        "https://www.schwabassetmanagement.com/api/fund-data/all-etfs",
-        parse_generic_catalog,
-    ),
-    "vaneck": (
-        "https://www.vaneck.com/api/products/us/etf/list/",
-        parse_generic_catalog,
-    ),
-    "globalx": (
-        "https://www.globalxetfs.com/api/funds/",
-        parse_generic_catalog,
-    ),
-    "wisdomtree": (
-        "https://www.wisdomtree.com/api/etfs/list",
-        parse_generic_catalog,
-    ),
-    "firsttrust": (
-        "https://www.ftportfolios.com/api/products/etf",
-        parse_generic_catalog,
-    ),
-    # Active shops. Their ETFs publish daily; their mutual funds do NOT
-    # (see the caveats in ACTIVE_DISCLOSURE below).
-    "capitalgroup": (
-        "https://www.capitalgroup.com/api/etf/products",
-        parse_generic_catalog,
-    ),
-    "troweprice": (
-        "https://www.troweprice.com/api/products/etf/list",
-        parse_generic_catalog,
-    ),
 }
+
+# --------------------------------------------------------------------------- #
+# Endpoint registry (issuer_endpoints.json) — data, not code.
+#
+# Every non-iShares URL was an unverified guess and ALL of them failed in
+# diagnose.py. Rather than keep guessing, endpoints now live in an editable
+# JSON file with a `verified` flag, and UNVERIFIED ISSUERS ARE EXCLUDED FROM
+# THE LIVE CASCADE. A broken URL therefore costs nothing instead of adding a
+# failing hop to every single lookup.
+#
+# Flip one on:  edit issuer_endpoints.json -> python issuer_catalog.py --probe X
+# --------------------------------------------------------------------------- #
+ENDPOINTS_FILE = BASE_DIR / "issuer_endpoints.json"
+
+
+def load_endpoints() -> dict:
+    try:
+        raw = json.loads(ENDPOINTS_FILE.read_text())
+    except Exception:
+        return {}
+    return {k: v for k, v in raw.items()
+            if not k.startswith("_") and isinstance(v, dict)}
+
+
+def verified_issuers() -> list:
+    return [k for k, v in load_endpoints().items() if v.get("verified")]
+
+
+def catalog_url(issuer: str):
+    return (load_endpoints().get(issuer) or {}).get("catalog_url")
+
+
+def holdings_url_template(issuer: str):
+    return (load_endpoints().get(issuer) or {}).get("holdings_url")
+
+
+def _all_catalog_entries() -> dict:
+    """Registry entries merged over the built-in CATALOGS (registry wins)."""
+    out = dict(CATALOGS)
+    for iss, cfg in load_endpoints().items():
+        url = cfg.get("catalog_url")
+        if not url:
+            continue
+        parser = (parse_ishares_catalog if cfg.get("parser") == "ishares"
+                  and iss == "ishares" else parse_generic_catalog)
+        out[iss] = (url, parser)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -226,7 +242,7 @@ def fetch_catalog(issuer: str, force: bool = False):
         cached = load_cached(issuer)
         if cached:
             return cached
-    entry = CATALOGS.get(issuer)
+    entry = _all_catalog_entries().get(issuer)
     if not entry:
         return {}
     url, parser = entry
@@ -251,7 +267,9 @@ def resolve(issuer: str, ticker: str, force: bool = False):
 def warm_all(issuers=None, force: bool = False):
     """Pre-fetch every catalog — one call per issuer. Run this nightly BEFORE
     the holdings refresh so the per-ticker work needs no discovery calls."""
-    issuers = issuers or list(CATALOGS)
+    # Only VERIFIED issuers. Warming a known-broken endpoint just burns
+    # requests and fills the log with noise.
+    issuers = issuers or verified_issuers() or list(CATALOGS)
     results = []
     for iss in issuers:
         cat = fetch_catalog(iss, force=force)
@@ -310,8 +328,56 @@ def _self_test():
     return 0
 
 
+def probe(issuers) -> int:
+    """Test candidate endpoints WITHOUT committing anything. Use this after
+    editing issuer_endpoints.json to confirm a URL before flipping verified."""
+    cfgs = load_endpoints()
+    bad = 0
+    for iss in issuers:
+        cfg = cfgs.get(iss)
+        if not cfg:
+            print(f"  ? {iss:<14} not in issuer_endpoints.json")
+            bad += 1
+            continue
+        url = cfg.get("catalog_url")
+        mark = "verified" if cfg.get("verified") else "UNVERIFIED"
+        print(f"\n  {iss}  [{mark}]\n  GET {url}")
+        try:
+            raw = polite_get(url, timeout=45, max_retries=0)
+        except Exception as e:
+            print(f"  -> FAIL {type(e).__name__}: {e}")
+            bad += 1
+            continue
+        head = raw[:200].decode("utf-8", "replace")
+        if "<html" in head.lower():
+            print("  -> HTML, not JSON (bot challenge or wrong URL)")
+            bad += 1
+            continue
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except Exception:
+            print(f"  -> not JSON: {head[:120]!r}")
+            bad += 1
+            continue
+        _url, parser = _all_catalog_entries().get(iss, (None, parse_generic_catalog))
+        cat = parser(data)
+        if cat:
+            print(f"  -> OK: parsed {len(cat)} funds. "
+                  f"Sample: {list(cat.items())[:3]}")
+            print(f"     Set \"verified\": true for {iss} in issuer_endpoints.json")
+        else:
+            print(f"  -> reachable but parsed 0 funds; payload keys: "
+                  f"{list(data)[:8] if isinstance(data, dict) else type(data).__name__}")
+            bad += 1
+    return 1 if bad else 0
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if "--probe" in args:
+        i = args.index("--probe")
+        names = args[i + 1:] or list(load_endpoints())
+        raise SystemExit(probe(names))
     if "--refresh" in args:
         i = args.index("--refresh")
         names = args[i + 1:] or None

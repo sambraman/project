@@ -13,6 +13,7 @@ Endpoints
   GET  /tickers                 what's cached and how fresh
   POST /refresh                 refresh tracked tickers (needs x-refresh-token)
   GET  /kpis?ticker=MSFT        sector-specific KPIs (capex/RPO, NIM, combined ratio)
+  GET  /stats                   what's in the datastore + freshness (ops)
   GET  /prices?ticker=IVV       daily price history (omit ticker for a summary)
   POST /refresh-prices          pull daily EOD bars (needs x-refresh-token)
 
@@ -37,6 +38,7 @@ from holdings import get_holdings, HoldingsError, classify_issuer
 from fundamentals import get_fundamentals, get_classification, get_history
 from store import FundamentalsStore, DEFAULT_PATH as STORE_PATH
 from sector_kpis import compute_sector_kpis
+from datastore import STORE
 import refresh as refresh_mod
 import refresh_prices as refresh_prices_mod
 
@@ -72,12 +74,17 @@ def holdings(ticker: str = Query(..., min_length=1),
              refresh: bool = Query(False, description="skip cache, fetch live")):
     """Full holdings for a ticker, tagged with the issuer's as-of date.
 
-    Cache-first: a cached result returns instantly. On a miss (or ?refresh=true)
-    it fetches from the issuer, caches, and returns. Unknown tickers route to the
-    N-PORT fallback (flagged is_stale) rather than erroring.
+    Store-first. A stored result returns with zero network calls. On a cold miss
+    (or ?refresh=true) it fetches, persists, and returns. If a live fetch fails
+    but we hold a previous copy, the STALE COPY IS SERVED rather than a 5xx —
+    dated data beats an error page.
     """
     ticker = ticker.upper().strip()
     if not refresh:
+        stored = STORE.get_holdings(ticker)
+        if stored:
+            stored["issuer_route"] = classify_issuer(ticker)
+            return stored
         cached = CACHE.get(ticker)
         if cached:
             cached["cached"] = True
@@ -85,8 +92,19 @@ def holdings(ticker: str = Query(..., min_length=1),
     try:
         result = get_holdings(ticker, offline=OFFLINE)
     except HoldingsError as e:
+        # Last resort: anything previously stored beats a hard failure.
+        stored = STORE.get_holdings(ticker)
+        if stored:
+            stored["issuer_route"] = classify_issuer(ticker)
+            stored["warnings"] = list(stored.get("warnings") or []) + [
+                f"Live fetch failed ({e}); serving the last stored copy."]
+            return stored
         raise HTTPException(status_code=404, detail=str(e))
     CACHE.put(result)
+    try:
+        STORE.put_holdings(result)
+    except Exception:
+        pass                      # persistence must never break a response
     payload = result.as_dict()
     payload["cached"] = False
     payload["issuer_route"] = classify_issuer(ticker)
@@ -209,13 +227,39 @@ def kpis(ticker: str = Query(..., min_length=1),
     resolved. Read `warnings` — they flag approximations (bank NIM) and data
     that genuinely isn't in companyfacts (cloud segment revenue).
     """
+    t = ticker.upper().strip()
+    # Store-first: filings are quarterly, so a cached KPI payload is valid for
+    # a week. This turns a multi-second EDGAR walk into a single SQLite read.
+    if sector:
+        hit = STORE.get_kpis(t, sector)
+        if hit and hit.get("fresh"):
+            return hit
     try:
-        res = compute_sector_kpis(ticker, sector=sector or None)
+        res = compute_sector_kpis(t, sector=sector or None)
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        for sec in (sector, "hyperscalers", "banks", "insurance"):
+            hit = STORE.get_kpis(t, sec) if sec else None
+            if hit:
+                hit["warnings"] = list(hit.get("warnings") or []) + [
+                    f"Live computation failed ({type(e).__name__}); serving "
+                    f"the last stored copy."]
+                return hit
         raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}")
-    return res.as_dict()
+    payload = res.as_dict()
+    try:
+        STORE.put_kpis(t, res.sector, res.period, payload)
+    except Exception:
+        pass
+    return payload
+
+
+@app.get("/stats")
+def stats():
+    """What's actually in the store and how fresh — the ops view. Use this to
+    confirm the nightly refresh is landing instead of guessing from the UI."""
+    return STORE.stats()
 
 
 @app.get("/prices")

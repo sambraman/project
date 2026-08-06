@@ -316,10 +316,18 @@ def _candidate_order(ticker: str, offline: bool) -> list:
     # resolve. Requests are NOT wasted, because each catalog-backed fetcher
     # short-circuits without a network call when its cached catalog positively
     # says it doesn't list the ticker (see _catalog_lists / fetch_ishares).
+    # Only issuers marked verified=true in issuer_endpoints.json enter the live
+    # cascade. An unconfirmed URL would otherwise add a guaranteed-failing hop
+    # to EVERY lookup — which is exactly what diagnose.py caught.
+    live_catalog = [i for i in CATALOG_ISSUERS
+                    if i in issuer_catalog.verified_issuers()]
     if guess == "nport":
-        return list(DAILY_ISSUERS) + list(CATALOG_ISSUERS) + ["nport"]
+        return list(DAILY_ISSUERS) + live_catalog + ["nport"]
+    if guess in CATALOG_ISSUERS and guess not in live_catalog:
+        # Classified to an unverified issuer: skip it, use the daily feeds.
+        return list(DAILY_ISSUERS) + ["nport"]
     return ([guess] + [i for i in DAILY_ISSUERS if i != guess]
-            + [i for i in CATALOG_ISSUERS if i != guess] + ["nport"])
+            + [i for i in live_catalog if i != guess] + ["nport"])
 
 
 def _load_ishares_map() -> dict:
@@ -418,6 +426,22 @@ def parse_ishares_csv(text: str) -> tuple[str, list]:
     return as_of, holdings
 
 
+def _row_text(row: dict, col) -> str:
+    """Safely read a DictReader cell.
+
+    Two traps: (1) if `col` is None (column never matched), row.get(None)
+    returns csv's *restkey* — a LIST of overflow values — and .strip() on it
+    raises AttributeError; (2) a short/ragged row yields None. Both are common
+    when an issuer serves an error page instead of the expected CSV.
+    """
+    if col is None:
+        return ""
+    val = row.get(col)
+    if isinstance(val, list):
+        val = val[0] if val else ""
+    return str(val or "").strip()
+
+
 def parse_invesco_csv(text: str) -> tuple[str, list]:
     """Invesco daily holdings CSV: a flat table with a Holding Ticker, Name,
     Weight and a per-row Date (used as the as-of)."""
@@ -427,14 +451,21 @@ def parse_invesco_csv(text: str) -> tuple[str, list]:
     ncol = _find_col(fields, ("name", "security name", "description"))
     wcol = _find_col(fields, ("weight", "weighting", "% weight"))
     dcol = _find_col(fields, ("date", "as of date", "holdings date"))
+    # Fail fast and cleanly rather than parsing garbage: if neither an
+    # identifier nor a weight column is present, this isn't a holdings CSV
+    # (usually an HTML error page). The cascade then moves on properly.
+    if tcol is None and ncol is None:
+        raise HoldingsError(
+            "Invesco response has no ticker/name column — not a holdings CSV "
+            f"(headers seen: {fields[:6]})")
     as_of, holdings = "", []
     for row in reader:
         if dcol and not as_of:
-            as_of = _parse_date(row.get(dcol, ""))
+            as_of = _parse_date(_row_text(row, dcol))
         holdings.append(Holding(
-            ticker=(row.get(tcol) or "").strip().upper(),
-            name=(row.get(ncol) or "").strip(),
-            weight=_to_decimal_weight(row.get(wcol)),
+            ticker=_row_text(row, tcol).upper(),
+            name=_row_text(row, ncol),
+            weight=_to_decimal_weight(_row_text(row, wcol) or None),
         ))
     return as_of, holdings
 
