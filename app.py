@@ -12,6 +12,8 @@ Endpoints
   GET  /holdings?ticker=IVV     full holdings (cache-first, live on miss)
   GET  /tickers                 what's cached and how fresh
   POST /refresh                 refresh tracked tickers (needs x-refresh-token)
+  GET  /prices?ticker=IVV       daily price history (omit ticker for a summary)
+  POST /refresh-prices          pull daily EOD bars (needs x-refresh-token)
 
 Set OFFLINE=1 to serve everything from the bundled fixtures (handy for a demo
 with no network).
@@ -29,10 +31,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 
 from cache import HoldingsCache
+from price_cache import PriceCache
 from holdings import get_holdings, HoldingsError, classify_issuer
 from fundamentals import get_fundamentals, get_classification, get_history
 from store import FundamentalsStore, DEFAULT_PATH as STORE_PATH
 import refresh as refresh_mod
+import refresh_prices as refresh_prices_mod
 
 BATCH_MAX = 60          # tickers per POST /fundamentals request
 BATCH_WORKERS = 8       # concurrent lookups (SEC's own throttle still paces to ~5/s)
@@ -46,6 +50,7 @@ app.add_middleware(
 )
 
 CACHE = HoldingsCache()
+PRICE_CACHE = PriceCache()
 REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")
 OFFLINE = os.environ.get("OFFLINE", "").lower() in ("1", "true", "yes", "on")
 
@@ -186,3 +191,21 @@ def do_refresh(x_refresh_token: str = Header(default="")):
         raise HTTPException(status_code=401, detail="bad or missing x-refresh-token")
     results = refresh_mod.refresh(offline=OFFLINE, cache=CACHE)
     return {"refreshed": results}
+
+
+@app.get("/prices")
+def prices(ticker: str = Query(default="", description="omit for a per-ticker summary"),
+           limit: int = Query(default=30, ge=1, le=365)):
+    if not ticker:
+        return {"tickers": PRICE_CACHE.list_tickers()}
+    return {"ticker": ticker.upper(),
+            "bars": PRICE_CACHE.get_history(ticker, limit=limit)}
+
+
+@app.post("/refresh-prices")
+def do_refresh_prices(x_refresh_token: str = Header(default=""),
+                      days: int = Query(default=7, ge=1, le=365)):
+    if not REFRESH_TOKEN or x_refresh_token != REFRESH_TOKEN:
+        raise HTTPException(status_code=401, detail="bad or missing x-refresh-token")
+    results = refresh_prices_mod.refresh_prices(cache=PRICE_CACHE, days=days)
+    return {"priced": results}

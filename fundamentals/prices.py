@@ -53,3 +53,64 @@ def _yfinance_price(ticker: str):
 def get_price(ticker: str):
     """Best available live price for a ticker, or None."""
     return _eodhd_price(ticker) or _yfinance_price(ticker)
+
+
+# --- daily end-of-day bars (for the nightly price-history job) --------------- #
+# get_price() above returns one live quote to finish valuation multiples. The
+# price job instead wants a daily OHLCV time series, so it uses EODHD's EOD
+# endpoint (yfinance history as the dev fallback). Same stdlib-only stack; the
+# close is the split/dividend-adjusted close when EODHD provides it.
+
+from datetime import date, timedelta
+
+
+def _eodhd_eod_bars(ticker: str, days: int):
+    key = os.environ.get("EODHD_API_KEY")
+    if not key:
+        return None
+    frm = (date.today() - timedelta(days=days)).isoformat()
+    url = (f"https://eodhd.com/api/eod/{ticker.upper()}.US"
+           f"?api_token={key}&fmt=json&order=d&from={frm}")
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "etf-backend"})
+        with urllib.request.urlopen(req, timeout=20, context=_SSL_CONTEXT) as r:
+            data = json.load(r)
+    except Exception:
+        return None
+    bars = []
+    for row in data or []:
+        close = row.get("adjusted_close")
+        if close in (None, "NA", ""):
+            close = row.get("close")
+        bars.append({
+            "date": row.get("date"), "open": row.get("open"),
+            "high": row.get("high"), "low": row.get("low"),
+            "close": close, "volume": row.get("volume"), "source": "eodhd",
+        })
+    return bars or None
+
+
+def _yfinance_eod_bars(ticker: str, days: int):
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None
+    try:
+        hist = yf.Ticker(ticker).history(period=f"{max(days, 1)}d")
+    except Exception:
+        return None
+    bars = []
+    for idx, row in hist.iterrows():
+        bars.append({
+            "date": idx.date().isoformat(),
+            "open": float(row["Open"]), "high": float(row["High"]),
+            "low": float(row["Low"]), "close": float(row["Close"]),
+            "volume": int(row["Volume"]), "source": "yfinance",
+        })
+    # newest-first, to match the EODHD path
+    return list(reversed(bars)) or None
+
+
+def get_eod_bars(ticker: str, days: int = 7):
+    """Recent daily OHLCV bars, newest-first, or None. EODHD then yfinance."""
+    return _eodhd_eod_bars(ticker, days) or _yfinance_eod_bars(ticker, days)
