@@ -522,14 +522,15 @@ def fetch_ishares(ticker: str, offline: bool) -> HoldingsResult:
                 f"iShares product id for {ticker} could not be resolved (not in "
                 f"the seed map and the screener lookup didn't return it)."
             )
-        # # VERIFY: iShares daily holdings CSV endpoint. iShares bot-protects this;
-        # if it returns an HTML page instead of CSV, the parser raises and the
-        # cascade falls through to N-PORT (which covers iShares quarterly).
-        url = (f"https://www.ishares.com/us/products/{pid}/fund/"
-               f"1467271812596.ajax?fileType=csv&fileName={ticker}_holdings&dataType=fund")
-        text = _http_get(url, headers=_BROWSER_HEADERS).decode("utf-8", "replace")
-        if "<html" in text[:2000].lower():
-            raise HoldingsError("iShares returned an HTML page, not the holdings CSV")
+        # Use the fund's REAL page path (with slug) from the screener. The old
+        # hardcoded "/fund/" segment is kept as a fallback pattern, but it is
+        # the likely cause of the HTML-instead-of-CSV response.
+        path = issuer_catalog.resolve_path("ishares", ticker) or ""
+        text, pattern = fetch_with_pattern_discovery(
+            "ishares", ticker, ISHARES_URL_PATTERNS,
+            {"pid": pid, "ticker": ticker.upper(), "path": path})
+        print(f"  iShares {ticker}: pattern {ISHARES_URL_PATTERNS.index(pattern) + 1} "
+              f"of {len(ISHARES_URL_PATTERNS)} worked")
     as_of, holdings = parse_ishares_csv(text)
     return HoldingsResult(ticker.upper(), as_of, "ishares", False, _finalize(holdings))
 
@@ -679,6 +680,100 @@ def _disclosure_warnings(issuer: str, ticker: str) -> list:
     if note and ticker.upper() not in issuer_catalog.SEMI_TRANSPARENT_TICKERS:
         warns.append(note[2])
     return warns
+
+
+# --------------------------------------------------------------------------- #
+# URL pattern auto-discovery
+#
+# The endpoint problem is that issuers change URL shapes and nobody can verify
+# them all by hand. So rather than betting on one hardcoded template, try a
+# short ranked list, validate that the RESPONSE IS ACTUALLY A HOLDINGS CSV
+# (not an HTML challenge or a redirect), and remember which pattern won so the
+# next call goes straight to it.
+#
+# Pattern 1 for iShares uses the real product page path (with slug) taken from
+# the screener. That is the most likely correct form and the one the previous
+# hardcoded "/fund/" guess got wrong.
+# --------------------------------------------------------------------------- #
+ISHARES_URL_PATTERNS = [
+    # Real page path from the catalog + the .ajax data endpoint.
+    "https://www.ishares.com{path}/1467271812596.ajax"
+    "?fileType=csv&fileName={ticker}_holdings&dataType=fund",
+    # Legacy literal-"fund" segment (what we had before).
+    "https://www.ishares.com/us/products/{pid}/fund/1467271812596.ajax"
+    "?fileType=csv&fileName={ticker}_holdings&dataType=fund",
+    # Some funds expose the file under a plain download path.
+    "https://www.ishares.com{path}/1467271812596.ajax"
+    "?fileType=csv&fileName={ticker}_holdings&dataType=fund&asOfDate=",
+]
+
+
+def _looks_like_holdings_csv(raw: bytes) -> bool:
+    """Reject HTML challenge pages and empty bodies before we try to parse."""
+    if not raw or len(raw) < 200:
+        return False
+    head = raw[:400].decode("utf-8", "replace").lower()
+    if "<html" in head or "<!doctype" in head:
+        return False
+    # A holdings file names its columns somewhere near the top.
+    return any(tok in head for tok in
+               ("ticker", "name", "weight", "cusip", "isin", "sedol", "asset class"))
+
+
+def _remembered_pattern_key(issuer: str) -> str:
+    return f"urlpattern:{issuer}"
+
+
+def fetch_with_pattern_discovery(issuer: str, ticker: str, patterns: list,
+                                 subs: dict):
+    """Try patterns until one returns a real CSV; remember the winner.
+
+    Returns (text, pattern_used). Raises HoldingsError if none work, listing
+    what each attempt actually returned so the failure is diagnosable.
+    """
+    try:
+        from datastore import STORE as _DS
+    except Exception:
+        _DS = None
+
+    ordered = list(patterns)
+    if _DS is not None:
+        hit = _DS.get_json("urlpattern", _remembered_pattern_key(issuer))
+        if hit and hit.value in ordered:
+            # Winner first; keep the rest as fallback in case it rotates.
+            ordered.remove(hit.value)
+            ordered.insert(0, hit.value)
+
+    problems = []
+    for pat in ordered:
+        try:
+            url = pat.format(**subs)
+        except KeyError as e:
+            problems.append(f"{pat[:48]}...: missing substitution {e}")
+            continue
+        if "{" in url or "//1467" in url:      # unfilled slot / empty path
+            problems.append(f"{pat[:48]}...: incomplete URL")
+            continue
+        try:
+            raw = _http_get(url, headers=_BROWSER_HEADERS)
+        except Exception as e:
+            problems.append(f"{url[:70]}...: {type(e).__name__}")
+            continue
+        if not _looks_like_holdings_csv(raw):
+            problems.append(f"{url[:70]}...: not a holdings CSV "
+                            f"(HTML challenge or empty)")
+            continue
+        if _DS is not None:
+            try:
+                _DS.put_json("urlpattern", _remembered_pattern_key(issuer), pat,
+                             ttl_hours=168)
+            except Exception:
+                pass
+        return raw.decode("utf-8", "replace"), pat
+
+    raise HoldingsError(
+        f"no working {issuer} holdings URL for {ticker}. Tried "
+        f"{len(ordered)} patterns: " + " | ".join(problems[:3]))
 
 
 def _catalog_lists(issuer: str, ticker: str):

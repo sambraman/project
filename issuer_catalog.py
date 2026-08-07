@@ -101,7 +101,18 @@ def parse_generic_catalog(data) -> dict:
 
 
 def parse_ishares_catalog(data) -> dict:
-    """iShares product screener: {productId: {...}}, ids are numeric."""
+    """iShares product screener -> {TICKER: {"pid": ..., "path": ...}}.
+
+    WHY THE PATH MATTERS: the holdings CSV lives under the fund's real page
+    path, which includes a SLUG — /us/products/239726/ishares-core-sp-500-etf —
+    not a literal "fund" segment. Requesting the wrong path redirects to a
+    landing page, which is why the endpoint returned HTML instead of CSV. The
+    screener hands us the correct path in productPageUrl, so we stop guessing
+    and use it.
+
+    Values are dicts; callers that only want the id use resolve(), which stays
+    backward compatible with the old {ticker: pid} string form.
+    """
     out = {}
     if not isinstance(data, dict):
         return out
@@ -110,11 +121,17 @@ def parse_ishares_catalog(data) -> dict:
             continue
         tick = str(_cell(rec.get("localExchangeTicker"))
                    or _cell(rec.get("fundTicker")) or "").strip().upper()
-        real = str(_cell(rec.get("productPageUrl")) or pid)
-        real = real.rstrip("/").split("/")[-1]
-        real = real if real.isdigit() else str(pid)
-        if tick and real.isdigit():
-            out[tick] = real
+        if not tick:
+            continue
+        path = str(_cell(rec.get("productPageUrl")) or "").strip().rstrip("/")
+        real = path.split("/")[-1] if path else str(pid)
+        if not real.isdigit():
+            # productPageUrl ends in the slug, so pull the numeric id from the
+            # path segments; fall back to the JSON key.
+            digits = [seg for seg in path.split("/") if seg.isdigit()]
+            real = digits[0] if digits else str(pid)
+        if real.isdigit():
+            out[tick] = {"pid": real, "path": path}
     return out
 
 
@@ -259,9 +276,29 @@ def fetch_catalog(issuer: str, force: bool = False):
     return catalog
 
 
+def _entry(catalog: dict, ticker: str):
+    """Catalog values are either a bare id (legacy/generic parser) or a dict
+    with pid+path (iShares). Normalize to a dict."""
+    v = catalog.get(ticker.upper())
+    if v is None:
+        return None
+    return v if isinstance(v, dict) else {"pid": str(v), "path": ""}
+
+
 def resolve(issuer: str, ticker: str, force: bool = False):
     """ticker -> issuer product id, or None."""
-    return fetch_catalog(issuer, force=force).get(ticker.upper())
+    e = _entry(fetch_catalog(issuer, force=force), ticker)
+    return e["pid"] if e else None
+
+
+def resolve_path(issuer: str, ticker: str, force: bool = False):
+    """ticker -> the fund's real product page path (with slug), or "".
+
+    This is what lets us build a holdings URL that actually resolves instead
+    of guessing at the path segment.
+    """
+    e = _entry(fetch_catalog(issuer, force=force), ticker)
+    return (e or {}).get("path", "")
 
 
 def warm_all(issuers=None, force: bool = False):
@@ -288,8 +325,14 @@ def _self_test():
         "bad": {"localExchangeTicker": ""},
     }
     cat = parse_ishares_catalog(ishares_payload)
-    assert cat == {"IVV": "239726", "IJH": "239763"}, cat
+    assert cat["IVV"]["pid"] == "239726" and cat["IJH"]["pid"] == "239763", cat
     print("  \u2713 iShares screener parses both cell shapes")
+    # The slug path is what lets us build a holdings URL that resolves.
+    assert cat["IVV"]["path"] == "/us/products/239726/fund", cat["IVV"]
+    print("  \u2713 product page PATH captured, not just the numeric id")
+    assert _entry(cat, "IVV")["pid"] == "239726"
+    assert _entry({"X": "999"}, "X") == {"pid": "999", "path": ""}
+    print("  \u2713 legacy string-valued catalogs still resolve (back compat)")
 
     # list-of-records shape
     assert parse_generic_catalog(

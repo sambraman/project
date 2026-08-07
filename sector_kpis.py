@@ -239,6 +239,91 @@ UTILITY_TAGS = [
     ("equity", "Equity", ["StockholdersEquity"], "instant", "USD", ""),
 ]
 
+ENERGY_TAGS = [
+    ("revenue", "Revenue", ["Revenues",
+                            "RevenueFromContractWithCustomerExcludingAssessedTax"],
+     "flow", "USD", ""),
+    ("capex", "Capital Expenditures",
+     ["PaymentsToAcquirePropertyPlantAndEquipment",
+      "PaymentsToAcquireOilAndGasProperty"], "flow", "USD", ""),
+    ("operating_cash_flow", "Operating Cash Flow",
+     ["NetCashProvidedByUsedInOperatingActivities"], "flow", "USD", ""),
+    ("dd_a", "DD&A",
+     ["DepreciationDepletionAndAmortization"], "flow", "USD",
+     "Depletion is the E&P-specific piece — it proxies reserve consumption."),
+    ("proved_reserves", "Proved Reserves",
+     ["ProvedDevelopedAndUndevelopedReservesNet"], "instant", "shares",
+     "Often disclosed only in the 10-K supplemental oil & gas tables."),
+    ("net_income", "Net Income", ["NetIncomeLoss"], "flow", "USD", ""),
+]
+
+PHARMA_TAGS = [
+    ("revenue", "Revenue",
+     ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"],
+     "flow", "USD", ""),
+    ("rnd", "R&D Expense", ["ResearchAndDevelopmentExpense"], "flow", "USD",
+     "R&D intensity is the pipeline investment rate — the core input for a "
+     "business whose revenue is a decaying patent annuity."),
+    ("sga", "SG&A", ["SellingGeneralAndAdministrativeExpense"], "flow", "USD", ""),
+    ("gross_profit", "Gross Profit", ["GrossProfit"], "flow", "USD", ""),
+    ("intangibles", "Intangibles & Goodwill",
+     ["IntangibleAssetsNetExcludingGoodwill", "Goodwill"], "instant", "USD",
+     "Large intangibles usually mean growth was bought, not discovered."),
+    ("net_income", "Net Income", ["NetIncomeLoss"], "flow", "USD", ""),
+]
+
+RETAIL_TAGS = [
+    ("revenue", "Revenue",
+     ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"],
+     "flow", "USD", ""),
+    ("cost_of_revenue", "Cost of Revenue",
+     ["CostOfGoodsAndServicesSold", "CostOfRevenue"], "flow", "USD", ""),
+    ("inventory", "Inventory", ["InventoryNet"], "instant", "USD", ""),
+    ("payables", "Accounts Payable", ["AccountsPayableCurrent"], "instant", "USD",
+     "Against inventory this gives the cash conversion cycle — how much of the "
+     "shelf the supplier is financing."),
+    ("operating_income", "Operating Income",
+     ["OperatingIncomeLoss"], "flow", "USD", ""),
+    ("lease_liability", "Operating Lease Liability",
+     ["OperatingLeaseLiabilityNoncurrent", "OperatingLeaseLiability"],
+     "instant", "USD", "The real fixed-cost burden for a store footprint."),
+]
+
+AIRLINE_TAGS = [
+    ("revenue", "Revenue",
+     ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"],
+     "flow", "USD", ""),
+    ("fuel_expense", "Fuel Expense",
+     ["FuelCosts", "AircraftFuelExpense"], "flow", "USD",
+     "Typically the largest and most volatile single cost line."),
+    ("operating_expense", "Operating Expense",
+     ["OperatingExpenses", "CostsAndExpenses"], "flow", "USD", ""),
+    ("operating_income", "Operating Income",
+     ["OperatingIncomeLoss"], "flow", "USD", ""),
+    ("debt", "Total Debt",
+     ["LongTermDebt", "DebtLongtermAndShorttermCombinedAmount"],
+     "instant", "USD", "Airlines are structurally levered; watch the trend."),
+    ("ppe", "Fleet (Net PP&E)",
+     ["PropertyPlantAndEquipmentNet"], "instant", "USD", ""),
+]
+
+MEDIA_TAGS = [
+    ("revenue", "Revenue",
+     ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"],
+     "flow", "USD", ""),
+    ("content_amortization", "Content Amortization",
+     ["AmortizationOfIntangibleAssets",
+      "CapitalizedContentCostsAmortizationExpense"], "flow", "USD",
+     "For streamers this is the real cost of goods; cash content spend and "
+     "amortized content can diverge for years."),
+    ("content_assets", "Content Assets",
+     ["CapitalizedContentCostsNet"], "instant", "USD", ""),
+    ("operating_income", "Operating Income",
+     ["OperatingIncomeLoss"], "flow", "USD", ""),
+    ("operating_cash_flow", "Operating Cash Flow",
+     ["NetCashProvidedByUsedInOperatingActivities"], "flow", "USD", ""),
+]
+
 SECTOR_TAGS = {
     "hyperscalers": HYPERSCALER_TAGS,
     "banks": BANK_TAGS,
@@ -246,6 +331,11 @@ SECTOR_TAGS = {
     "semiconductors": SEMICONDUCTOR_TAGS,
     "reits": REIT_TAGS,
     "utilities": UTILITY_TAGS,
+    "energy": ENERGY_TAGS,
+    "pharma": PHARMA_TAGS,
+    "retail": RETAIL_TAGS,
+    "airlines": AIRLINE_TAGS,
+    "media": MEDIA_TAGS,
 }
 
 
@@ -381,11 +471,70 @@ DERIVED = {
          lambda r: _div(r.get("net_income_ttm"), r.get("equity")),
          "Compare against the allowed ROE in the utility's rate case."),
     ],
+    "energy": [
+        ("fcf", "Free Cash Flow", "USD",
+         lambda r: None if (r.get("operating_cash_flow") is None
+                            or r.get("capex") is None)
+         else r["operating_cash_flow"] - r["capex"],
+         "The whole thesis for the sector post-2020: capital discipline over "
+         "production growth."),
+        ("reinvestment_rate", "Capex / Operating Cash Flow", "ratio",
+         lambda r: _div(r.get("capex"), r.get("operating_cash_flow")),
+         "Below ~0.5 signals genuine discipline; a sharp rise is the classic "
+         "late-cycle warning."),
+        ("dda_intensity", "DD&A / Revenue", "ratio",
+         lambda r: _div(r.get("dd_a"), r.get("revenue")), ""),
+    ],
+    "pharma": [
+        ("rnd_intensity", "R&D Intensity", "ratio",
+         lambda r: _div(r.get("rnd"), r.get("revenue")),
+         "Pipeline investment rate. Big pharma clusters near 15-25%."),
+        ("gross_margin", "Gross Margin", "ratio",
+         lambda r: _div(r.get("gross_profit"), r.get("revenue")), ""),
+        ("sga_intensity", "SG&A Intensity", "ratio",
+         lambda r: _div(r.get("sga"), r.get("revenue")),
+         "SG&A well above R&D suggests marketing is doing more work than the "
+         "science."),
+    ],
+    "retail": [
+        ("gross_margin", "Gross Margin", "ratio",
+         lambda r: None if (r.get("revenue") in (None, 0)
+                            or r.get("cost_of_revenue") is None)
+         else (r["revenue"] - r["cost_of_revenue"]) / r["revenue"], ""),
+        ("inventory_days", "Inventory Days", "ratio",
+         lambda r: None if _div(r.get("inventory"), r.get("cost_of_revenue"))
+         is None else _div(r.get("inventory"), r.get("cost_of_revenue")) * 91.0,
+         "Rising inventory days ahead of flat sales is the markdown warning."),
+        ("payable_days", "Payable Days", "ratio",
+         lambda r: None if _div(r.get("payables"), r.get("cost_of_revenue"))
+         is None else _div(r.get("payables"), r.get("cost_of_revenue")) * 91.0,
+         "Payables above inventory days = suppliers finance the shelf "
+         "(negative working capital)."),
+        ("operating_margin", "Operating Margin", "ratio",
+         lambda r: _div(r.get("operating_income"), r.get("revenue")), ""),
+    ],
+    "airlines": [
+        ("fuel_intensity", "Fuel / Revenue", "ratio",
+         lambda r: _div(r.get("fuel_expense"), r.get("revenue")),
+         "The single biggest swing factor in airline earnings."),
+        ("operating_margin", "Operating Margin", "ratio",
+         lambda r: _div(r.get("operating_income"), r.get("revenue")),
+         "Mid-single-digit is normal; the operating leverage cuts both ways."),
+        ("debt_to_fleet", "Debt / Net PP&E", "ratio",
+         lambda r: _div(r.get("debt"), r.get("ppe")),
+         "How much of the fleet is financed."),
+    ],
+    "media": [
+        ("content_intensity", "Content Amortization / Revenue", "ratio",
+         lambda r: _div(r.get("content_amortization"), r.get("revenue")),
+         "The effective cost of goods for a streaming business."),
+        ("operating_margin", "Operating Margin", "ratio",
+         lambda r: _div(r.get("operating_income"), r.get("revenue")), ""),
+        ("content_to_ocf", "Content Assets / Operating Cash Flow", "ratio",
+         lambda r: _div(r.get("content_assets"), r.get("operating_cash_flow_ttm")),
+         "How many years of cash flow are tied up on the shelf."),
+    ],
 }
-
-
-# --------------------------------------------------------------------------- #
-# Sector detection
 # --------------------------------------------------------------------------- #
 HYPERSCALER_TICKERS = {"MSFT", "AMZN", "GOOGL", "GOOG", "ORCL", "META",
                        "IBM", "CRM", "SNOW", "NOW", "BABA"}
@@ -402,6 +551,14 @@ SIC_SECTORS = [
     ((3674, 3674), "semiconductors"),
     ((3559, 3559), "semiconductors"),
     ((7372, 7379), "hyperscalers"),
+    ((1311, 1389), "energy"),
+    ((2911, 2911), "energy"),
+    ((2834, 2836), "pharma"),
+    ((8731, 8731), "pharma"),
+    ((5200, 5990), "retail"),
+    ((4512, 4513), "airlines"),
+    ((4841, 4899), "media"),
+    ((7812, 7841), "media"),
 ]
 
 
